@@ -1,0 +1,16 @@
+# 改行コードはリポジトリ内では LF に統一し、チェックアウト時に環境へ合わせる
+* text=auto eol=lf
+
+# Windows でしか使わないものは CRLF のままにする
+*.iss text eol=crlf
+
+# テスト用の音声・動画は絶対に変換させない
+*.mp3 binary
+*.wav binary
+*.flac binary
+*.m4a binary
+*.ogg binary
+*.oga binary
+*.opus binary
+*.mp4 binary
+*.ico binary

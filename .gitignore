@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+build/
+dist/
+.vscode/
+.idea/
+.pytest_cache/
+
+# 変換で生成されたファイル（テストアセットは下で除外を解除する）
+*.ogg
+*.oga
+*.ogg.part
+*.part
+
+# テストアセットはリポジトリに含める
+!tests/assets/*.ogg
+!tests/assets/*.oga

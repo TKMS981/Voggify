@@ -1,0 +1,8 @@
+# 開発・テスト・ビルド用の依存パッケージ
+#   pip install -r requirements.txt -r requirements-dev.txt
+
+# テスト
+pytest>=7.0
+
+# exe のビルド（pyinstaller voggify.spec）
+pyinstaller>=6.0
