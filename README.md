@@ -284,6 +284,35 @@ python main.py convert <file> [options] # OGG Vorbis / MP3 に変換
       --verbose        ffmpeg のログを表示
 ```
 
+## アイコン
+
+`assets/icon.png`（1254x1254）が原本で、そこから `assets/icon.ico` を作って
+exe・インストーラー・ショートカット・ウィンドウに使っている。
+
+```sh
+python assets/generate_icon.py
+```
+
+生成した `.ico` はコミットしてあるので、通常このコマンドは要らない。
+原本を差し替えたときだけ実行する。
+
+- 収録サイズは 16 / 24 / 32 / 48 / 64 / 128 / 256（すべて 32bit）
+- 元画像が 256px 未満だと拡大が要るため、スクリプトが警告して止まる
+  （拡大で埋めると輪郭が荒れるので、原本を用意し直す方針）
+- Pillow はこのスクリプトを走らせるときだけ必要で、アプリの実行時には使わない
+
+反映先は 4 箇所。
+
+| 場所 | 設定 |
+| --- | --- |
+| exe のアイコン | `voggify.spec` の `ICON_PATH` |
+| インストーラー（Setup.exe） | `voggify.iss` の `SetupIconFile` |
+| ショートカット / アンインストール一覧 | `voggify.iss` の `IconFilename` / `UninstallDisplayIcon` |
+| ウィンドウとタスクバー | `app.py` / `main_window.py` の `setWindowIcon` |
+
+実行時にアイコンを読むため、`.ico` は exe にも同梱している
+（`voggify/resources.py` が `sys._MEIPASS` から探す）。
+
 ## テスト
 
 ```sh
@@ -316,11 +345,41 @@ pytest -k cancel                    # 名前で絞り込み
 | `test_waveform.py` | 波形の生成、精度、キャッシュの LRU |
 | `test_ui_waveform.py` | 波形の描画、ドラッグ選択、数値欄との同期 |
 | `test_ui_preview.py` | プレビュー再生、全形式の再生確認、音量の換算 |
+| `test_resources.py` | アイコンの収録サイズ、元画像の解像度、ウィンドウへの反映 |
 
 `ffmpeg` マーカーの付いたテストは ffmpeg を起動する。未インストールなら自動でスキップする。
 書き込み権限のテストは、拒否が効かない環境（管理者権限での実行など）ではスキップする。
 
-### テストアセット
+### アイコン
+
+`assets/icon.png`（1254x1254）が原本で、そこから `assets/icon.ico` を作って
+exe・インストーラー・ショートカット・ウィンドウに使っている。
+
+```sh
+python assets/generate_icon.py
+```
+
+生成した `.ico` はコミットしてあるので、通常このコマンドは要らない。
+原本を差し替えたときだけ実行する。
+
+- 収録サイズは 16 / 24 / 32 / 48 / 64 / 128 / 256（すべて 32bit）
+- 元画像が 256px 未満だと拡大が要るため、スクリプトが警告して止まる
+  （拡大で埋めると輪郭が荒れるので、原本を用意し直す方針）
+- Pillow はこのスクリプトを走らせるときだけ必要で、アプリの実行時には使わない
+
+反映先は 4 箇所。
+
+| 場所 | 設定 |
+| --- | --- |
+| exe のアイコン | `voggify.spec` の `ICON_PATH` |
+| インストーラー（Setup.exe） | `voggify.iss` の `SetupIconFile` |
+| ショートカット / アンインストール一覧 | `voggify.iss` の `IconFilename` / `UninstallDisplayIcon` |
+| ウィンドウとタスクバー | `app.py` / `main_window.py` の `setWindowIcon` |
+
+実行時にアイコンを読むため、`.ico` は exe にも同梱している
+（`voggify/resources.py` が `sys._MEIPASS` から探す）。
+
+## テストアセット
 
 `tests/assets/` に置いてあるのは ffmpeg の `lavfi` で生成した 440Hz のサイン波で、
 著作物は含まない（合計約 2MB）。作り直したいときは次を実行する。
@@ -357,10 +416,9 @@ pyinstaller --clean voggify.spec   # キャッシュを捨ててビルドし直�
 
 | 変数 | 用途 |
 | --- | --- |
-| `ICON_PATH` | `.ico` のパス。`None` なら PyInstaller の既定アイコン |
+| `ICON_PATH` | `.ico` のパス（既定 `assets/icon.ico`）。`None` で既定アイコン |
 | `EXCLUDES` | 取り込まない Qt モジュール。減らすと exe が小さくなる |
 
-アイコンを用意したら `ICON_PATH = "assets/voggify.ico"` のように書き換えるだけでよい。
 `EXCLUDES` に足すときは、外したあと必ず起動確認すること
 （`shiboken6` は PySide6 の中核なので絶対に外さない。`PySide6.QtMultimedia` は
 プレビュー再生に使うので外さない）。
@@ -473,6 +531,7 @@ voggify/
   editing.py               トリミング・音量のパラメータ（Qt 非依存）
   waveform.py              波形の生成とキャッシュ（Qt 非依存）
   models.py                リスト項目のデータ構造（Qt 非依存）
+  resources.py             同梱リソースのパス解決（frozen 対応）
   cli.py                   CLI
   console.py               windowed ビルドでの標準出力の確保
   app.py                   GUI の起動処理と excepthook
@@ -494,6 +553,10 @@ tests/
   qt_helpers.py            イベントループ操作、D&D の合成、権限操作
   assets/                  テスト用の音声（generate_assets.py で再生成できる）
   test_*.py                テスト本体
+assets/
+  icon.png                 アイコンの原本
+  icon.ico                 生成物（コミット対象）
+  generate_icon.py         .ico の生成
 pytest.ini                 pytest の設定
 voggify.spec               PyInstaller のビルド設定
 voggify.iss                Inno Setup のインストーラー定義

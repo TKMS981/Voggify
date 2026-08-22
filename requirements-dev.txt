@@ -6,3 +6,7 @@ pytest>=7.0
 
 # exe のビルド（pyinstaller voggify.spec）
 pyinstaller>=6.0
+
+# アイコンの生成（python assets/generate_icon.py）
+# 生成した .ico はコミットしてあるので、アプリの実行時には不要
+Pillow>=10.0

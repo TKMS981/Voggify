@@ -10,6 +10,7 @@ from types import TracebackType
 from . import __app_name__
 from .config import load_config
 from .ffmpeg_locator import find_ffmpeg_tools
+from .resources import icon_path
 
 
 def _fallback_report(
@@ -52,16 +53,41 @@ def install_excepthook(window) -> None:  # noqa: ANN001
     sys.excepthook = hook
 
 
+def _claim_taskbar_identity() -> None:
+    """Windows のタスクバーで独自のアイコンを使わせる。
+
+    これを設定しないと、ソースから起動したときにタスクバーが
+    python.exe のアイコンでまとめてしまう。
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            f"Voggify.{__app_name__}"
+        )
+    except Exception:  # noqa: BLE001 - 付かなくても動作に影響はない
+        pass
+
+
 def run(argv: list[str] | None = None) -> int:
     """QApplication を立ち上げてメインウィンドウを表示する。"""
+    from PySide6.QtGui import QIcon
     from PySide6.QtWidgets import QApplication
 
     from .ui.main_window import MainWindow
+
+    _claim_taskbar_identity()
 
     args = argv if argv is not None else sys.argv
     app = QApplication(args)
     app.setApplicationName(__app_name__)
     app.setOrganizationName(__app_name__)
+
+    icon = icon_path()
+    if icon is not None:
+        app.setWindowIcon(QIcon(str(icon)))
 
     # 起動時に一度だけ探索する。見つからなくても起動は続行し、
     # ウィンドウ上部の警告バーから再確認できるようにする。

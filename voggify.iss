@@ -10,6 +10,7 @@
 #define AppName        "Voggify"
 #define AppPublisher   "Voggify"
 #define AppExeName     "Voggify.exe"
+#define AppIconFile    "assets\icon.ico"
 #define AppSourceExe   "dist\" + AppExeName
 
 #ifnexist AppSourceExe
@@ -35,7 +36,9 @@ AppVerName={#AppName} {#AppVersion}
 VersionInfoVersion={#AppVersion}
 AppPublisher={#AppPublisher}
 UninstallDisplayName={#AppName} {#AppVersion}
-UninstallDisplayIcon={app}\{#AppExeName}
+; アンインストール一覧（設定 > アプリ）に出るアイコン。
+; インストール先に置いた .ico を直接指す。
+UninstallDisplayIcon={app}\icon.ico
 
 ; 管理者権限を要求しない。ユーザー単位でインストールする。
 PrivilegesRequired=lowest
@@ -54,8 +57,8 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 
 LicenseFile=LICENSE
-SetupIconFile=
-; アイコンを用意したら SetupIconFile=assets\voggify.ico のように指定する
+; インストーラー自身（Setup.exe）のアイコン
+SetupIconFile={#AppIconFile}
 
 [Languages]
 Name: "japanese"; MessagesFile: "compiler:Languages\Japanese.isl"
@@ -66,12 +69,14 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 
 [Files]
 Source: "dist\{#AppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+; ショートカットとアンインストール一覧が参照するので実体を置く
+Source: "{#AppIconFile}";     DestDir: "{app}"; DestName: "icon.ico"; Flags: ignoreversion
 Source: "README.md";          DestDir: "{app}"; Flags: ignoreversion isreadme
 Source: "LICENSE";            DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExeName}"
-Name: "{autodesktop}\{#AppName}";  Filename: "{app}\{#AppExeName}"; Tasks: desktopicon
+Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExeName}"; IconFilename: "{app}\icon.ico"
+Name: "{autodesktop}\{#AppName}";  Filename: "{app}\{#AppExeName}"; IconFilename: "{app}\icon.ico"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\{#AppExeName}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent
@@ -80,6 +85,7 @@ Filename: "{app}\{#AppExeName}"; Description: "{cm:LaunchProgram,{#AppName}}"; F
 ; PyInstaller の onefile が展開に使う一時フォルダは %TEMP% なので触らない。
 ; 設定ファイル（{userappdata}\Voggify）はここに書かない。
 ; アンインストール時に消すかどうかは下の [Code] でユーザーに尋ねる。
+Type: files; Name: "{app}\icon.ico"
 Type: dirifempty; Name: "{app}"
 
 [Code]

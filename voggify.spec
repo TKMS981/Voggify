@@ -87,13 +87,13 @@ VERSION_FILE = _write_version_resource()
 print(f"[voggify.spec] バージョン {APP_VERSION} をビルドします")
 
 # --- アイコン ---------------------------------------------------------------
-# 用意できたら .ico のパスを入れる（例: "assets/voggify.ico"）。
-# None のままなら PyInstaller の既定アイコンになる。
-ICON_PATH = None
+# exe に埋め込むアイコン。None にすると PyInstaller の既定アイコンになる。
+# 元画像は assets/icon.png で、assets/generate_icon.py が .ico を作る。
+ICON_PATH = "assets/icon.ico"
 
 _icon = None
 if ICON_PATH:
-    _candidate = Path(ICON_PATH)
+    _candidate = _ROOT / ICON_PATH
     if _candidate.is_file():
         _icon = str(_candidate.resolve())
     else:
@@ -142,7 +142,9 @@ a = Analysis(
     ["main.py"],
     pathex=[],
     binaries=[],
-    datas=[],
+    # アイコンは exe に埋め込むだけでなく、実行時にも読む
+    # （setWindowIcon 用。voggify/resources.py が sys._MEIPASS から探す）
+    datas=[(str(_ROOT / "assets" / "icon.ico"), "assets")] if _icon else [],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

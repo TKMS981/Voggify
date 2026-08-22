@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt
-from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtGui import QAction, QIcon, QKeySequence
 from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
@@ -33,6 +33,7 @@ from ..converter import ConversionOptions
 from ..ffmpeg_locator import FFmpegTools, find_ffmpeg_tools, missing_ffmpeg_message
 from ..formats import SUPPORTED_EXTENSIONS, format_bytes
 from ..models import FileStatus
+from ..resources import icon_path
 from .conversion_service import (
     OUTCOME_CANCELLED,
     OUTCOME_DONE,
@@ -104,6 +105,9 @@ class MainWindow(QMainWindow):
         self._config_warnings = list(config_warnings or [])
 
         self.setWindowTitle(f"{__app_name__} {__version__}")
+        icon = icon_path()
+        if icon is not None:
+            self.setWindowIcon(QIcon(str(icon)))
         self.resize(940, 640)
         self.setMinimumSize(QSize(720, 480))
 
