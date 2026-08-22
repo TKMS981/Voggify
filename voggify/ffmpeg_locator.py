@@ -59,11 +59,27 @@ class FFmpegTools:
     ffmpeg: str
     ffprobe: str
     version: str
-    has_libvorbis: bool
+    #: 使えるエンコーダー名の集合（libvorbis / libmp3lame など）
+    encoders: frozenset[str] = frozenset()
+
+    @property
+    def has_libvorbis(self) -> bool:
+        return "libvorbis" in self.encoders
+
+    @property
+    def has_libmp3lame(self) -> bool:
+        return "libmp3lame" in self.encoders
+
+    def supports(self, output_format) -> bool:  # noqa: ANN001 - 循環 import を避ける
+        """その出力形式でエンコードできるか。"""
+        return output_format.encoder in self.encoders
 
     def describe(self) -> str:
-        vorbis = "libvorbis 利用可" if self.has_libvorbis else "libvorbis 見つからず"
-        return f"{self.version} ({vorbis})\n  ffmpeg : {self.ffmpeg}\n  ffprobe: {self.ffprobe}"
+        found = "、".join(sorted(self.encoders)) if self.encoders else "エンコーダー見つからず"
+        return (
+            f"{self.version} ({found})\n"
+            f"  ffmpeg : {self.ffmpeg}\n  ffprobe: {self.ffprobe}"
+        )
 
 
 def _candidate_dirs() -> list[str]:
@@ -119,8 +135,8 @@ def _run_capture(argv: list[str], timeout: float = 15.0) -> subprocess.Completed
     )
 
 
-def _probe_version(ffmpeg_path: str) -> tuple[str, bool]:
-    """`ffmpeg -version` を叩いてバージョン文字列と libvorbis の有無を得る。"""
+def _probe_version(ffmpeg_path: str) -> tuple[str, frozenset[str]]:
+    """`ffmpeg -version` を叩いてバージョン文字列と使えるエンコーダーを得る。"""
     try:
         result = _run_capture([ffmpeg_path, "-hide_banner", "-version"])
     except (OSError, subprocess.SubprocessError) as exc:
@@ -136,19 +152,29 @@ def _probe_version(ffmpeg_path: str) -> tuple[str, bool]:
     output = result.stdout or ""
     match = re.search(r"ffmpeg version (\S+)", output)
     version = f"ffmpeg {match.group(1)}" if match else "ffmpeg (バージョン不明)"
-    has_libvorbis = "--enable-libvorbis" in output
-    if not has_libvorbis:
-        has_libvorbis = _has_libvorbis_encoder(ffmpeg_path)
-    return version, has_libvorbis
+
+    found = {name for name in WANTED_ENCODERS if f"--enable-{name}" in output}
+    missing = WANTED_ENCODERS - found
+    if missing:
+        # ビルド情報に出ない場合があるので -encoders でも確かめる
+        found |= _list_encoders(ffmpeg_path, missing)
+    return version, frozenset(found)
 
 
-def _has_libvorbis_encoder(ffmpeg_path: str) -> bool:
-    """`ffmpeg -encoders` に libvorbis があるか確認する（ビルド情報が無い場合の保険）。"""
+#: 出力形式が必要とするエンコーダー。output_formats と揃えること。
+WANTED_ENCODERS: frozenset[str] = frozenset({"libvorbis", "libmp3lame"})
+
+
+def _list_encoders(ffmpeg_path: str, wanted: set[str]) -> set[str]:
+    """`ffmpeg -encoders` の一覧から、探しているものを拾う。"""
     try:
         result = _run_capture([ffmpeg_path, "-hide_banner", "-encoders"])
     except (OSError, subprocess.SubprocessError):
-        return False
-    return result.returncode == 0 and "libvorbis" in (result.stdout or "")
+        return set()
+    if result.returncode != 0:
+        return set()
+    listing = result.stdout or ""
+    return {name for name in wanted if name in listing}
 
 
 _cached_tools: FFmpegTools | None = None
@@ -168,12 +194,12 @@ def find_ffmpeg_tools(force_refresh: bool = False) -> FFmpegTools | None:
     if not ffmpeg_path or not ffprobe_path:
         return None
 
-    version, has_libvorbis = _probe_version(ffmpeg_path)
+    version, encoders = _probe_version(ffmpeg_path)
     _cached_tools = FFmpegTools(
         ffmpeg=ffmpeg_path,
         ffprobe=ffprobe_path,
         version=version,
-        has_libvorbis=has_libvorbis,
+        encoders=encoders,
     )
     return _cached_tools
 
@@ -183,14 +209,25 @@ def ensure_ffmpeg_tools(force_refresh: bool = False) -> FFmpegTools:
     tools = find_ffmpeg_tools(force_refresh=force_refresh)
     if tools is None:
         raise FFmpegNotFoundError(missing_ffmpeg_message())
-    if not tools.has_libvorbis:
+    if not tools.encoders:
         raise FFmpegNotFoundError(
-            "この ffmpeg は libvorbis エンコーダーを含んでいないため、"
-            "OGG Vorbis へ変換できません。\n"
-            "libvorbis 付きのビルド（公式配布版など）を利用してください。\n"
+            "この ffmpeg は libvorbis も libmp3lame も含んでいないため、変換できません。\n"
+            "エンコーダー付きのビルド（公式配布版など）を利用してください。\n"
             f"  検出したffmpeg: {tools.ffmpeg}"
         )
     return tools
+
+
+def missing_encoder_message(output_format, ffmpeg_path: str = "") -> str:  # noqa: ANN001
+    """特定の出力形式が使えないときの案内。"""
+    lines = [
+        f"この ffmpeg は {output_format.encoder_label} を含んでいないため、"
+        f"{output_format.label} へ変換できません。",
+        f"{output_format.encoder_label} 付きのビルド（公式配布版など）を利用してください。",
+    ]
+    if ffmpeg_path:
+        lines.append(f"  検出したffmpeg: {ffmpeg_path}")
+    return "\n".join(lines)
 
 
 def missing_ffmpeg_message() -> str:

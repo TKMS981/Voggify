@@ -118,7 +118,7 @@ EXCLUDES = [
     "PySide6.Qt3DRender",
     "PySide6.QtCharts",
     "PySide6.QtDataVisualization",
-    "PySide6.QtMultimedia",
+    # QtMultimedia はプレビュー再生に使うので外さないこと
     "PySide6.QtMultimediaWidgets",
     "PySide6.QtSql",
     "PySide6.QtTest",

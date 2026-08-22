@@ -12,6 +12,7 @@ from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
 
 from ..errors import FFmpegNotFoundError, VoggifyError
 from ..ffmpeg_locator import FFmpegTools
+from ..output_formats import DEFAULT_OUTPUT_FORMAT, OutputFormat
 from ..probe import AudioInfo, inspect
 
 #: 同時に走らせる ffprobe の本数。多すぎるとプロセス生成でかえって遅くなる。
@@ -34,12 +35,14 @@ class _ProbeTask(QRunnable):
         path: Path,
         tools: FFmpegTools | None,
         signals: _ProbeSignals,
+        output_format: OutputFormat,
     ) -> None:
         super().__init__()
         self._generation = generation
         self._path = path
         self._tools = tools
         self._signals = signals
+        self._output_format = output_format
 
     def run(self) -> None:  # noqa: D102 - QRunnable の規定メソッド
         info: AudioInfo | None = None
@@ -49,7 +52,9 @@ class _ProbeTask(QRunnable):
                 raise FFmpegNotFoundError(
                     "ffmpeg が見つからないため解析できません。"
                 )
-            info = inspect(self._path, self._tools)
+            info = inspect(
+                self._path, self._tools, output_format=self._output_format
+            )
         except VoggifyError as exc:
             message = exc.user_message
         except Exception as exc:  # noqa: BLE001 - ワーカーから例外を漏らさない
@@ -68,6 +73,7 @@ class ProbeService(QObject):
     def __init__(self, tools: FFmpegTools | None = None, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._tools = tools
+        self._output_format: OutputFormat = DEFAULT_OUTPUT_FORMAT
         self._pool = QThreadPool(self)
         self._pool.setMaxThreadCount(
             min(MAX_CONCURRENT_PROBES, max(1, QThreadPool.globalInstance().maxThreadCount()))
@@ -82,6 +88,10 @@ class ProbeService(QObject):
         """ffmpeg を後から検出し直したときに差し替える。"""
         self._tools = tools
 
+    def set_output_format(self, output_format: OutputFormat) -> None:
+        """出力形式が変わると「既に変換済み」の判定も変わる。"""
+        self._output_format = output_format
+
     @property
     def busy(self) -> bool:
         return self._pending > 0
@@ -90,7 +100,12 @@ class ProbeService(QObject):
         """解析タスクを投入する。"""
         for path in paths:
             self._pending += 1
-            self._pool.start(_ProbeTask(self._generation, path, self._tools, self._signals))
+            self._pool.start(
+                _ProbeTask(
+                    self._generation, path, self._tools, self._signals,
+                    self._output_format,
+                )
+            )
 
     def discard_pending(self) -> None:
         """未処理の結果を無視する（リストをクリアしたときなど）。

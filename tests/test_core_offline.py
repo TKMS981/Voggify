@@ -31,10 +31,23 @@ from voggify.formats import (
     format_estimated_size,
     is_supported_extension,
 )
+from voggify.output_formats import (
+    DEFAULT_OUTPUT_FORMAT,
+    DEFAULT_QUALITY,
+    MAX_QUALITY,
+    MIN_QUALITY,
+    MP3,
+    OGG_VORBIS,
+    OUTPUT_FORMATS,
+    output_format_by_key,
+)
 from voggify.probe import AudioInfo, check_supported
 
 FAKE_TOOLS = FFmpegTools(
-    ffmpeg="ffmpeg.exe", ffprobe="ffprobe.exe", version="test", has_libvorbis=True
+    ffmpeg="ffmpeg.exe",
+    ffprobe="ffprobe.exe",
+    version="test",
+    encoders=frozenset({"libvorbis", "libmp3lame"}),
 )
 
 
@@ -399,3 +412,94 @@ def test_ensure_streams_falls_back_when_console_cannot_be_opened(monkeypatch):
     assert console.ensure_streams() is False
     print("落ちない")
     sys.stdout.close()
+
+
+# ---------------------------------------------------------------------------
+# 出力形式（OGG Vorbis / MP3）
+# ---------------------------------------------------------------------------
+def test_output_formats_are_registered():
+    assert [f.key for f in OUTPUT_FORMATS] == ["ogg", "mp3"]
+    assert DEFAULT_OUTPUT_FORMAT is OGG_VORBIS
+
+
+@pytest.mark.parametrize("fmt", OUTPUT_FORMATS)
+def test_quality_is_monotonic_for_every_format(fmt):
+    """共通スライダーは全形式で「大きいほど高音質」でなければならない。"""
+    sizes = [fmt.nominal_bitrate_bps(q) for q in range(MIN_QUALITY, MAX_QUALITY + 1)]
+    assert sizes == sorted(sizes), f"{fmt.label} でビットレートが逆転している: {sizes}"
+
+
+def test_vorbis_quality_maps_straight_through():
+    for q in range(11):
+        assert OGG_VORBIS.encoder_quality(q) == q
+
+
+def test_mp3_quality_is_inverted():
+    """LAME は小さいほど高音質なので、共通尺度とは逆向きに写す。"""
+    assert MP3.encoder_quality(MIN_QUALITY) == 9   # 最低音質 -> V9
+    assert MP3.encoder_quality(MAX_QUALITY) == 0   # 最高音質 -> V0
+    mapped = [MP3.encoder_quality(q) for q in range(11)]
+    assert mapped == sorted(mapped, reverse=True), f"単調減少でない: {mapped}"
+
+
+def test_mp3_tops_out_at_v0():
+    """MP3 の VBR は上限があるので、最上位の 2 段は同じ設定になる。"""
+    assert MP3.encoder_quality(9) == MP3.encoder_quality(10) == 0
+
+
+@pytest.mark.parametrize("fmt", OUTPUT_FORMATS)
+def test_encoder_args_use_the_right_encoder(fmt):
+    args = fmt.encoder_args(DEFAULT_QUALITY)
+    assert args[:2] == ["-c:a", fmt.encoder]
+    assert args[2] == "-q:a"
+    assert args[3] == str(fmt.encoder_quality(DEFAULT_QUALITY))
+
+
+@pytest.mark.parametrize("fmt", OUTPUT_FORMATS)
+def test_build_command_follows_the_format(fmt):
+    cmd = build_command(FAKE_TOOLS, Path("in.wav"), Path("out.part"), 6, fmt)
+    assert fmt.encoder in cmd
+    assert cmd[cmd.index("-f") + 1] == fmt.container
+    assert cmd[cmd.index("-q:a") + 1] == str(fmt.encoder_quality(6))
+
+
+@pytest.mark.parametrize("fmt", OUTPUT_FORMATS)
+def test_output_extension_follows_the_format(tmp_path, fmt):
+    source = tmp_path / "song.wav"
+    source.write_bytes(b"x")
+    destination = resolve_output_path(source, ConversionOptions(output_format=fmt))
+    assert destination == tmp_path / f"song{fmt.extension}"
+
+
+def test_already_in_target_format_is_rejected_per_format():
+    """「変換不要」の判定は出力形式ごとに変わる。"""
+    mp3_input = audio_info("a.mp3", "mp3")
+    vorbis_input = audio_info("a.ogg", "vorbis")
+
+    # MP3 出力なら MP3 入力を弾き、Vorbis 入力は通す
+    with pytest.raises(UnsupportedFormatError, match="既に MP3 です"):
+        check_supported(mp3_input, output_format=MP3)
+    check_supported(vorbis_input, output_format=MP3)
+
+    # OGG 出力ならその逆
+    with pytest.raises(UnsupportedFormatError, match="既に OGG Vorbis です"):
+        check_supported(vorbis_input, output_format=OGG_VORBIS)
+    check_supported(mp3_input, output_format=OGG_VORBIS)
+
+
+def test_size_estimate_differs_by_format():
+    ogg = OGG_VORBIS.estimate_size(60.0, 10, 2)
+    mp3 = MP3.estimate_size(60.0, 10, 2)
+    assert ogg > mp3, "MP3 の VBR は Vorbis の最高品質より上限が低い"
+
+
+def test_quality_hint_shows_the_encoder_value():
+    assert "libvorbis -q:a 6" in OGG_VORBIS.quality_hint(6)
+    assert "libmp3lame -q:a 3" in MP3.quality_hint(6)
+
+
+def test_output_format_by_key():
+    assert output_format_by_key("ogg") is OGG_VORBIS
+    assert output_format_by_key("mp3") is MP3
+    assert output_format_by_key("flac") is None
+    assert output_format_by_key(None) is None

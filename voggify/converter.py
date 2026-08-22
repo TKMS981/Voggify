@@ -20,10 +20,12 @@ from .errors import (
     OutputPathError,
     describe_os_error,
 )
+from .editing import EditSettings
 from .ffmpeg_errors import describe_failure
 from .ffmpeg_locator import FFmpegTools, ensure_ffmpeg_tools, subprocess_flags
-from .formats import DEFAULT_QUALITY, OUTPUT_EXTENSION, clamp_quality
-from .probe import AudioInfo, inspect
+from .formats import DEFAULT_QUALITY, clamp_quality
+from .output_formats import DEFAULT_OUTPUT_FORMAT, OutputFormat
+from .probe import AudioInfo, check_supported, inspect
 
 #: 進捗コールバック: 0.0〜1.0 の比率を受け取る
 ProgressCallback = Callable[[float], None]
@@ -43,12 +45,15 @@ class ConversionOptions:
     output_dir: Path | None = None
     #: True なら同名ファイルを上書き、False なら「名前 (1).ogg」のように退避
     overwrite: bool = False
+    #: 変換先の形式
+    output_format: OutputFormat = DEFAULT_OUTPUT_FORMAT
 
     def normalized(self) -> "ConversionOptions":
         return ConversionOptions(
             quality=clamp_quality(self.quality),
             output_dir=Path(self.output_dir).expanduser() if self.output_dir else None,
             overwrite=self.overwrite,
+            output_format=self.output_format,
         )
 
 
@@ -69,14 +74,15 @@ def resolve_output_path(source: Path, options: ConversionOptions) -> Path:
     """出力先パスを決める（衝突回避まで含む）。"""
     options = options.normalized()
     directory = options.output_dir or source.parent
-    candidate = directory / (source.stem + OUTPUT_EXTENSION)
+    extension = options.output_format.extension
+    candidate = directory / (source.stem + extension)
 
     if options.overwrite:
         return candidate
 
     index = 1
     while candidate.exists():
-        candidate = directory / f"{source.stem} ({index}){OUTPUT_EXTENSION}"
+        candidate = directory / f"{source.stem} ({index}){extension}"
         index += 1
     return candidate
 
@@ -113,24 +119,34 @@ def build_command(
     source: Path,
     destination: Path,
     quality: int,
+    output_format: OutputFormat = DEFAULT_OUTPUT_FORMAT,
+    edit: EditSettings | None = None,
+    source_duration: float | None = None,
 ) -> list[str]:
     """ffmpeg のコマンドライン引数を組み立てる。
 
     destination は途中ファイル（.part）になりうるので、拡張子に依存しないよう
-    `-f ogg` でコンテナを明示する。
+    `-f` でコンテナを明示する。品質はエンコーダーごとに尺度が違うため、
+    OutputFormat 側で変換してもらう。
+
+    トリミングの `-ss` / `-t` は `-i` の前（入力側）に置く。精度は出力側と
+    同じで、離れた位置を切り出すときに速いため（editing.py の説明を参照）。
+    編集が既定値なら余計な引数は一切足さない。
     """
+    edit = edit or EditSettings()
     return [
         tools.ffmpeg,
         "-hide_banner",
         "-nostdin",
         "-loglevel", "info",
         "-y",
+        *edit.input_args(source_duration),  # トリミング（入力側シーク）
         "-i", str(source),
         "-map", "0:a:0",       # 先頭の音声ストリームのみ（カバーアート等は除外）
         "-map_metadata", "0",  # タグを引き継ぐ
-        "-c:a", "libvorbis",
-        "-q:a", str(clamp_quality(quality)),
-        "-f", "ogg",
+        *edit.filter_args(),   # 音量調整
+        *output_format.encoder_args(quality),
+        "-f", output_format.container,
         "-progress", "pipe:1",
         "-stats_period", "0.2",  # 既定の 0.5 秒だと進捗バーの動きが粗い
         "-nostats",
@@ -182,6 +198,7 @@ class Converter:
         options: ConversionOptions | None = None,
         *,
         info: AudioInfo | None = None,
+        edit: EditSettings | None = None,
         on_progress: ProgressCallback | None = None,
         on_log: LogCallback | None = None,
     ) -> ConversionResult:
@@ -190,6 +207,7 @@ class Converter:
         失敗時は ConversionError、中断時は ConversionCancelled を送出する。
         """
         options = (options or ConversionOptions()).normalized()
+        edit = edit or EditSettings()
         src = Path(source).expanduser()
 
         if self._cancelled.is_set():
@@ -197,7 +215,10 @@ class Converter:
 
         # 実体を確認して対応フォーマットか判定（未指定なら都度 probe する）
         if info is None:
-            info = inspect(src, self.tools)
+            info = inspect(src, self.tools, output_format=options.output_format)
+        else:
+            # 呼び出し側で解析済みでも、出力形式との組み合わせは見直す
+            check_supported(info, output_format=options.output_format)
 
         destination = resolve_output_path(src, options)
         ensure_writable_dir(destination.parent)
@@ -205,7 +226,15 @@ class Converter:
             raise OutputPathError(f"入力と出力が同じファイルになります: {destination}")
 
         partial = destination.with_name(destination.name + PARTIAL_SUFFIX)
-        argv = build_command(self.tools, src, partial, options.quality)
+        argv = build_command(
+            self.tools,
+            src,
+            partial,
+            options.quality,
+            options.output_format,
+            edit,
+            info.duration_sec,
+        )
 
         if on_log:
             on_log("$ " + " ".join(_quote(arg) for arg in argv))
@@ -214,7 +243,9 @@ class Converter:
         log_lines: list[str] = []
         returncode = self._run(
             argv,
-            total_duration=info.duration_sec,
+            # ffmpeg の out_time はトリミング後の相対時間なので、
+            # 進捗の分母も切り出し後の長さにする（実測で確認済み）
+            total_duration=edit.effective_duration(info.duration_sec),
             on_progress=on_progress,
             on_log=on_log,
             log_sink=log_lines,
@@ -262,7 +293,7 @@ class Converter:
             source=src,
             output=destination,
             quality=options.quality,
-            duration_sec=info.duration_sec,
+            duration_sec=edit.effective_duration(info.duration_sec),
             output_size=output_size,
             elapsed_sec=elapsed,
             log=log_text,

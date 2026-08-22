@@ -13,18 +13,20 @@ from PySide6.QtCore import QAbstractTableModel, QModelIndex, QObject, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QIcon
 from PySide6.QtWidgets import QApplication, QStyle
 
-from ..formats import DEFAULT_QUALITY, SUPPORTED_EXTENSIONS
+from ..formats import SUPPORTED_EXTENSIONS
+from ..output_formats import DEFAULT_OUTPUT_FORMAT, DEFAULT_QUALITY, OutputFormat
 from ..models import FileItem, FileStatus
 from ..probe import AudioInfo
 
 COL_STATUS = 0
 COL_NAME = 1
 COL_FORMAT = 2
-COL_SIZE = 3
-COL_PROGRESS = 4
-COLUMN_COUNT = 5
+COL_EDIT = 3
+COL_SIZE = 4
+COL_PROGRESS = 5
+COLUMN_COUNT = 6
 
-_HEADERS = ("状態", "ファイル名", "現在の形式", "変換後のサイズ", "進捗")
+_HEADERS = ("状態", "ファイル名", "現在の形式", "編集", "変換後のサイズ", "進捗")
 
 #: delegate から進捗と状態を読むためのカスタムロール
 ROLE_PROGRESS = Qt.ItemDataRole.UserRole + 1
@@ -34,6 +36,8 @@ ROLE_STATUS = Qt.ItemDataRole.UserRole + 2
 ERROR_FOREGROUND = QColor(150, 150, 150)
 #: 注記付き行のアクセント色
 NOTE_FOREGROUND = QColor(196, 120, 0)
+#: 編集ありを示す色
+EDIT_FOREGROUND = QColor(90, 170, 220)
 
 
 class FileListModel(QAbstractTableModel):
@@ -46,6 +50,7 @@ class FileListModel(QAbstractTableModel):
         super().__init__(parent)
         self._items: list[FileItem] = []
         self._quality: int = DEFAULT_QUALITY
+        self._output_format: OutputFormat = DEFAULT_OUTPUT_FORMAT
         self._icons: dict[FileStatus, QIcon] = {}
 
     # ------------------------------------------------------------------
@@ -71,7 +76,7 @@ class FileListModel(QAbstractTableModel):
             # 見出しの寄せを中身に合わせる
             if section == COL_SIZE:
                 alignment = Qt.AlignmentFlag.AlignRight
-            elif section == COL_STATUS:
+            elif section in (COL_STATUS, COL_EDIT):
                 alignment = Qt.AlignmentFlag.AlignCenter
             else:
                 alignment = Qt.AlignmentFlag.AlignLeft
@@ -96,13 +101,15 @@ class FileListModel(QAbstractTableModel):
             return self._status_icon(item.status)
 
         if role == Qt.ItemDataRole.ToolTipRole:
-            return item.tooltip(self._quality)
+            return item.tooltip(self._quality, self._output_format)
 
         if role == Qt.ItemDataRole.ForegroundRole:
             if item.status.is_error:
                 return QBrush(ERROR_FOREGROUND)
             if item.note and column == COL_FORMAT:
                 return QBrush(NOTE_FOREGROUND)
+            if column == COL_EDIT and not item.edit.is_default:
+                return QBrush(EDIT_FOREGROUND)
             return None
 
         if role == Qt.ItemDataRole.FontRole and item.status.is_error:
@@ -110,8 +117,11 @@ class FileListModel(QAbstractTableModel):
             font.setItalic(True)
             return font
 
-        if role == Qt.ItemDataRole.TextAlignmentRole and column == COL_SIZE:
-            return int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        if role == Qt.ItemDataRole.TextAlignmentRole:
+            if column == COL_SIZE:
+                return int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            if column == COL_EDIT:
+                return int(Qt.AlignmentFlag.AlignCenter)
 
         return None
 
@@ -127,8 +137,10 @@ class FileListModel(QAbstractTableModel):
             return item.name
         if column == COL_FORMAT:
             return item.display_format()
+        if column == COL_EDIT:
+            return item.edit.badge()
         if column == COL_SIZE:
-            return item.display_size(self._quality)
+            return item.display_size(self._quality, self._output_format)
         if column == COL_PROGRESS:
             # 進捗バーを描かない状態のときだけテキストを出す
             if item.status is FileStatus.QUEUED:
@@ -173,19 +185,32 @@ class FileListModel(QAbstractTableModel):
     def quality(self) -> int:
         return self._quality
 
+    def output_format(self) -> OutputFormat:
+        return self._output_format
+
+    def set_output_format(self, output_format: OutputFormat) -> None:
+        """出力形式が変わったら予測サイズを引き直す。"""
+        if output_format is self._output_format:
+            return
+        self._output_format = output_format
+        self._refresh_size_column()
+
     def set_quality(self, quality: int) -> None:
-        """品質が変わったら予測サイズを引き直す（ステップ4のスライダー用）。"""
+        """品質が変わったら予測サイズを引き直す。"""
         if quality == self._quality:
             return
         self._quality = quality
+        self._refresh_size_column()
+
+    def _refresh_size_column(self) -> None:
         if self._items:
             self.dataChanged.emit(
                 self.index(0, COL_SIZE),
                 self.index(len(self._items) - 1, COL_SIZE),
                 [Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.ToolTipRole],
             )
-            # サマリーの合計予測サイズも引き直す
-            self.contents_changed.emit()
+        # サマリーの合計予測サイズも引き直す
+        self.contents_changed.emit()
 
     def add_paths(self, paths: Iterable[Path]) -> tuple[list[Path], int]:
         """ファイルを追加する。
@@ -337,6 +362,19 @@ class FileListModel(QAbstractTableModel):
         index = self.index(row, COL_PROGRESS)
         self.dataChanged.emit(index, index, [ROLE_PROGRESS, Qt.ItemDataRole.DisplayRole])
 
+    def set_edit(self, row: int, edit) -> FileItem | None:  # noqa: ANN001
+        """1 行の編集内容を差し替える。予測サイズも引き直す。"""
+        item = self.item_at(row)
+        if item is None:
+            return None
+        item.edit = edit
+        self._emit_row_changed(row)
+        self.contents_changed.emit()
+        return item
+
+    def edited_count(self) -> int:
+        return sum(1 for item in self._items if not item.edit.is_default)
+
     def append_log(self, path: str | Path, line: str) -> None:
         row = self.find_row(path)
         if row >= 0:
@@ -417,7 +455,7 @@ class FileListModel(QAbstractTableModel):
 
     def total_estimated_size(self) -> int:
         return sum(
-            item.estimated_size(self._quality) or 0
+            item.estimated_size(self._quality, self._output_format) or 0
             for item in self._items
             if item.status is FileStatus.READY
         )

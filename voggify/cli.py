@@ -16,13 +16,14 @@ from pathlib import Path
 from .converter import ConversionOptions, Converter
 from .errors import VoggifyError
 from .ffmpeg_locator import ensure_ffmpeg_tools, find_ffmpeg_tools, missing_ffmpeg_message
-from .formats import (
+from .formats import estimate_output_size, format_bytes, format_duration
+from .output_formats import (
+    DEFAULT_OUTPUT_FORMAT,
     DEFAULT_QUALITY,
     MAX_QUALITY,
     MIN_QUALITY,
-    estimate_output_size,
-    format_bytes,
-    format_duration,
+    OUTPUT_FORMATS,
+    output_format_by_key,
 )
 from .probe import inspect
 
@@ -44,8 +45,12 @@ def cmd_check(_args: argparse.Namespace) -> int:
         return 1
     print("ffmpeg を検出しました:")
     print("  " + tools.describe())
-    if not tools.has_libvorbis:
-        print("\n警告: libvorbis が見つかりません。OGG Vorbis へ変換できない可能性があります.")
+    missing = [f.label for f in OUTPUT_FORMATS if not tools.supports(f)]
+    if missing:
+        print(
+            "\n警告: エンコーダーが足りないため、次の形式へは変換できません: "
+            + "、".join(missing)
+        )
         return 1
     return 0
 
@@ -53,8 +58,11 @@ def cmd_check(_args: argparse.Namespace) -> int:
 def cmd_info(args: argparse.Namespace) -> int:
     """ファイルの解析結果と変換後サイズ予測を表示する。"""
     tools = ensure_ffmpeg_tools()
-    info = inspect(args.input, tools)
-    estimated = estimate_output_size(info.duration_sec, args.quality, info.channels)
+    target = _resolve_format(args)
+    info = inspect(args.input, tools, output_format=target)
+    estimated = estimate_output_size(
+        info.duration_sec, args.quality, info.channels, target
+    )
 
     print(f"ファイル      : {info.path.name}")
     print(f"パス          : {info.path}")
@@ -63,21 +71,35 @@ def cmd_info(args: argparse.Namespace) -> int:
     print(f"サンプルレート: {info.sample_rate or '-'} Hz / {info.channels} ch")
     print(f"ビットレート  : {int(info.bit_rate_bps / 1000) if info.bit_rate_bps else '-'} kbps")
     print(f"現在のサイズ  : {format_bytes(info.file_size)}")
-    print(f"変換後の予測  : {format_bytes(estimated)}  (-q:a {args.quality})")
+    print(
+        f"変換後の予測  : {format_bytes(estimated)}"
+        f"  ({target.label} / 品質 {args.quality}"
+        f" -> {target.encoder} -q:a {target.encoder_quality(args.quality)})"
+    )
     return 0
+
+
+def _resolve_format(args: argparse.Namespace):
+    """--format の指定を OutputFormat に直す。"""
+    return output_format_by_key(getattr(args, "format", None)) or DEFAULT_OUTPUT_FORMAT
 
 
 def cmd_convert(args: argparse.Namespace) -> int:
     """1 ファイルを OGG Vorbis に変換する。"""
     tools = ensure_ffmpeg_tools()
-    info = inspect(args.input, tools)
+    target = _resolve_format(args)
+    info = inspect(args.input, tools, output_format=target)
     options = ConversionOptions(
         quality=args.quality,
         output_dir=Path(args.output_dir) if args.output_dir else None,
         overwrite=args.overwrite,
+        output_format=target,
     )
 
-    print(f"変換: {info.path.name}  [{info.display_format} -> OGG Vorbis q{args.quality}]")
+    print(
+        f"変換: {info.path.name}  "
+        f"[{info.display_format} -> {target.label} 品質{args.quality}]"
+    )
     converter = Converter(tools)
     on_log = (lambda line: print(f"  | {line}")) if args.verbose else None
 
@@ -109,7 +131,7 @@ def cmd_convert(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="voggify",
-        description="音楽ファイルを OGG Vorbis に変換します。",
+        description="音楽ファイルを OGG Vorbis / MP3 に変換します。",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -120,17 +142,25 @@ def build_parser() -> argparse.ArgumentParser:
         "type": int,
         "default": DEFAULT_QUALITY,
         "metavar": f"{MIN_QUALITY}-{MAX_QUALITY}",
-        "help": f"OGG Vorbis の品質 -q:a (既定: {DEFAULT_QUALITY})",
+        "help": f"品質 0-10 / 大きいほど高音質 (既定: {DEFAULT_QUALITY})",
+    }
+
+    format_kwargs = {
+        "choices": [f.key for f in OUTPUT_FORMATS],
+        "default": DEFAULT_OUTPUT_FORMAT.key,
+        "help": "出力形式 (既定: %s)" % DEFAULT_OUTPUT_FORMAT.key,
     }
 
     info_cmd = subparsers.add_parser("info", help="ファイルを解析して情報を表示")
     info_cmd.add_argument("input", help="入力ファイル")
     info_cmd.add_argument("-q", "--quality", **quality_kwargs)  # type: ignore[arg-type]
+    info_cmd.add_argument("-f", "--format", **format_kwargs)  # type: ignore[arg-type]
     info_cmd.set_defaults(func=cmd_info)
 
-    convert = subparsers.add_parser("convert", help="OGG Vorbis に変換")
+    convert = subparsers.add_parser("convert", help="OGG Vorbis / MP3 に変換")
     convert.add_argument("input", help="入力ファイル")
     convert.add_argument("-q", "--quality", **quality_kwargs)  # type: ignore[arg-type]
+    convert.add_argument("-f", "--format", **format_kwargs)  # type: ignore[arg-type]
     convert.add_argument(
         "-o", "--output-dir",
         default=None,

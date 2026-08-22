@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 )
 
 from .file_list_model import (
+    COL_EDIT,
     COL_FORMAT,
     COL_NAME,
     COL_PROGRESS,
@@ -83,6 +84,7 @@ class FileListView(QTableView):
         header.setSectionResizeMode(COL_STATUS, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(COL_NAME, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(COL_FORMAT, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(COL_EDIT, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(COL_SIZE, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(COL_PROGRESS, QHeaderView.ResizeMode.Fixed)
         header.resizeSection(COL_PROGRESS, 150)

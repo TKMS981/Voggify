@@ -39,11 +39,13 @@ from .conversion_service import (
     ConversionJob,
     ConversionService,
 )
+from .edit_panel import EditPanel
 from .file_list_model import FileListModel, collect_audio_files
 from .file_list_view import FileListView
 from .log_panel import LogPanel
 from .probe_service import ProbeService
 from .settings_panel import SettingsPanel
+from .waveform_service import WaveformService
 
 
 def _file_dialog_filter() -> str:
@@ -107,6 +109,7 @@ class MainWindow(QMainWindow):
 
         self.model = FileListModel(self)
         self.probe_service = ProbeService(tools, self)
+        self.waveform_service = WaveformService(tools, self)
         self.conversion = ConversionService(self)
 
         #: 変換中は UI をロックする
@@ -151,6 +154,11 @@ class MainWindow(QMainWindow):
         self.clear_button = QPushButton("全てクリア")
         buttons.addWidget(self.clear_button)
 
+        self.edit_button = QPushButton("編集")
+        self.edit_button.setCheckable(True)
+        self.edit_button.setToolTip("トリミングと音量の編集パネルを開閉します (Ctrl+E)")
+        buttons.addWidget(self.edit_button)
+
         self.log_button = QPushButton("ログ")
         self.log_button.setCheckable(True)
         self.log_button.setToolTip("変換ログの表示を切り替えます (Ctrl+L)")
@@ -170,6 +178,11 @@ class MainWindow(QMainWindow):
         # --- 変換設定（品質・出力先）---
         self.settings = SettingsPanel(central)
         layout.addWidget(self.settings)
+
+        # --- 編集（トリミング・音量）。既定は畳んでおく ---
+        self.edit_panel = EditPanel(central)
+        self.edit_panel.hide()
+        layout.addWidget(self.edit_panel)
 
         # --- ファイル一覧 + ログパネル（縦分割・ログは既定で非表示）---
         self.splitter = QSplitter(Qt.Orientation.Vertical, central)
@@ -219,6 +232,13 @@ class MainWindow(QMainWindow):
         add_action.triggered.connect(self.open_file_dialog)
         self.addAction(add_action)
 
+        edit_action = QAction("編集パネルの表示を切り替え", self)
+        edit_action.setShortcut(QKeySequence("Ctrl+E"))
+        edit_action.triggered.connect(
+            lambda: self.set_edit_panel_visible(not self.edit_panel.isVisible())
+        )
+        self.addAction(edit_action)
+
         log_action = QAction("ログの表示を切り替え", self)
         log_action.setShortcut(QKeySequence("Ctrl+L"))
         log_action.triggered.connect(lambda: self.set_log_visible(not self.log_panel.isVisible()))
@@ -242,9 +262,17 @@ class MainWindow(QMainWindow):
         self.banner.recheck_button.clicked.connect(self._recheck_ffmpeg)
         self.banner.details_button.clicked.connect(self._show_ffmpeg_help)
 
+        self.edit_button.toggled.connect(self.set_edit_panel_visible)
+        self.edit_panel.edit_changed.connect(self._on_edit_changed)
+        self.waveform_service.ready.connect(self._on_waveform_ready)
+        self.view.selectionModel().selectionChanged.connect(
+            lambda *_: self._sync_edit_panel()
+        )
+
         self.log_button.toggled.connect(self.set_log_visible)
         self.log_panel.close_requested.connect(lambda: self.set_log_visible(False))
 
+        self.settings.output_format_changed.connect(self._on_output_format_changed)
         self.settings.quality_changed.connect(self._on_quality_changed)
         self.settings.output_dir_changed.connect(self._on_output_dir_changed)
         self.settings.validity_changed.connect(lambda *_: self._update_buttons())
@@ -338,6 +366,11 @@ class MainWindow(QMainWindow):
         if self._locked:
             self.statusBar().showMessage("変換中は削除できません。", 5000)
             return
+        # 消す行の波形キャッシュも捨てる
+        for row in rows:
+            item = self.model.item_at(row)
+            if item is not None and not item.status.is_busy:
+                self.waveform_service.discard(item.path)
         removed = self.model.remove_rows(rows)
         skipped = len(rows) - removed
         message = f"{removed} 件を削除しました。"
@@ -352,6 +385,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("変換中はクリアできません。", 5000)
             return
         self.probe_service.discard_pending()
+        self.waveform_service.clear()
         self.model.clear()
         self.statusBar().showMessage("リストをクリアしました。", 4000)
 
@@ -368,12 +402,18 @@ class MainWindow(QMainWindow):
         warnings = list(self._config_warnings)
 
         restore_warning = self.settings.restore(
-            config.quality, config.use_custom_output_dir, config.output_dir
+            config.quality,
+            config.use_custom_output_dir,
+            config.output_dir,
+            config.output_format,
         )
         if restore_warning:
             warnings.append(restore_warning)
 
+        self.model.set_output_format(self.settings.output_format())
+        self.probe_service.set_output_format(self.settings.output_format())
         self.model.set_quality(self.settings.quality())
+        self.set_edit_panel_visible(config.edit_panel_visible)
         self.set_log_visible(config.log_visible)
         self._apply_window_geometry(config.window)
 
@@ -415,9 +455,11 @@ class MainWindow(QMainWindow):
         geometry = self.geometry()
         return AppConfig(
             quality=self.settings.quality(),
+            output_format=self.settings.output_format().key,
             use_custom_output_dir=self.settings.uses_custom_output_dir(),
             output_dir=str(remembered) if remembered else None,
             log_visible=self.log_panel.isVisible(),
+            edit_panel_visible=self.edit_panel.isVisible(),
             window=WindowGeometry(
                 x=geometry.x(),
                 y=geometry.y(),
@@ -435,6 +477,94 @@ class MainWindow(QMainWindow):
             self.log(reason, "error")
             self.statusBar().showMessage(reason, 8000)
         return saved
+
+    # ------------------------------------------------------------------
+    # 編集パネル
+    # ------------------------------------------------------------------
+    def set_edit_panel_visible(self, visible: bool) -> None:
+        """編集パネルの開閉。"""
+        self.edit_panel.setVisible(visible)
+        if self.edit_button.isChecked() != visible:
+            self.edit_button.blockSignals(True)
+            self.edit_button.setChecked(visible)
+            self.edit_button.blockSignals(False)
+        if visible:
+            self._sync_edit_panel()
+
+    def _sync_edit_panel(self) -> None:
+        """選択に合わせて編集パネルの対象を切り替える。
+
+        1 行だけ選ばれているときに有効。未選択・複数選択では無効化する。
+        """
+        self._update_buttons()
+        if not self.edit_panel.isVisible():
+            return
+
+        rows = self.view.selected_rows()
+        if len(rows) != 1:
+            self.edit_panel.set_target(None, None, None)  # 再生も止まる
+            if len(rows) > 1:
+                self.edit_panel.target_label.setText(
+                    f"{len(rows)} 件選択中です。編集するファイルを 1 つだけ選んでください。"
+                )
+            return
+
+        item = self.model.item_at(rows[0])
+        if item is None or item.status.is_error:
+            self.edit_panel.set_target(None, None, None)
+            if item is not None:
+                self.edit_panel.target_label.setText(
+                    f"{item.name} は変換できないため編集できません。"
+                )
+            return
+
+        self.edit_panel.set_target(item.name, item.edit, item.source_duration)
+        self.edit_panel.set_source_path(item.path)
+        self._request_waveform(item)
+
+    def _request_waveform(self, item) -> None:  # noqa: ANN001
+        """選択中のファイルの波形を用意する。キャッシュがあれば即座に出る。"""
+        if item.info is None or not item.source_duration:
+            self.edit_panel.set_waveform(None, "長さが不明なため波形を表示できません。")
+            return
+        cached = self.waveform_service.request(
+            item.path, item.source_duration, item.info.sample_rate
+        )
+        if cached is not None:
+            self.edit_panel.set_waveform(cached)
+        else:
+            self.edit_panel.set_waveform(None, "波形を読み込み中…")
+
+    def _on_waveform_ready(self, path: str, data: object, message: str) -> None:
+        """生成が終わった。まだ同じ行が選ばれていれば反映する。"""
+        rows = self.view.selected_rows()
+        if len(rows) != 1:
+            return
+        item = self.model.item_at(rows[0])
+        if item is None or str(item.path) != path:
+            return  # 選択が変わっていたので捨てる
+        if data is None:
+            self.edit_panel.set_waveform(None, message or "波形を生成できませんでした。")
+            if message:
+                self.log(f"{item.name}: {message}", "warn")
+        else:
+            self.edit_panel.set_waveform(data)  # type: ignore[arg-type]
+
+    def _on_edit_changed(self, edit: object) -> None:
+        """パネルの変更を選択中の行に書き戻す。"""
+        rows = self.view.selected_rows()
+        if len(rows) != 1:
+            return
+        item = self.model.set_edit(rows[0], edit)
+        if item is None:
+            return
+        description = item.edit.describe(item.source_duration)
+        if description:
+            self.statusBar().showMessage(
+                f"{item.name}: " + description.replace("\n", " / "), 6000
+            )
+        else:
+            self.statusBar().showMessage(f"{item.name}: 編集を解除しました。", 4000)
 
     # ------------------------------------------------------------------
     # ログパネル
@@ -486,6 +616,28 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # 変換設定
     # ------------------------------------------------------------------
+    def _on_output_format_changed(self, output_format: object) -> None:
+        """出力形式が変わったら、予測サイズと対応判定をやり直す。
+
+        「既に MP3 です」のような判定は変換先によって変わるため、
+        解析済みの項目も含めて再評価する必要がある。
+        """
+        self.model.set_output_format(output_format)  # type: ignore[arg-type]
+        self.probe_service.set_output_format(output_format)  # type: ignore[arg-type]
+        self.statusBar().showMessage(
+            f"出力形式: {output_format.label}（{output_format.extension}）", 5000  # type: ignore[attr-defined]
+        )
+        self.log(f"出力形式を {output_format.label} に変更しました。")  # type: ignore[attr-defined]
+        self._update_ffmpeg_banner()
+        self._revalidate_items()
+
+    def _revalidate_items(self) -> None:
+        """出力形式が変わったときに、解析済みの項目を判定し直す。"""
+        rows = self.model.rows_of_status(FileStatus.READY, FileStatus.ERROR)
+        paths = self.model.reset_to_analyzing(rows)
+        if paths:
+            self.probe_service.submit(paths)
+
     def _on_quality_changed(self, quality: int) -> None:
         """スライダーの値をリストの予測サイズに即座に反映する。"""
         self.model.set_quality(quality)
@@ -518,15 +670,17 @@ class MainWindow(QMainWindow):
             quality=self.settings.quality(),
             output_dir=self.settings.output_dir(),
             overwrite=False,
+            output_format=self.settings.output_format(),
         )
 
     def start_conversion(self) -> bool:
         """待機中の項目をキューに積んで変換を開始する。"""
         if self.conversion.running:
             return False
-        if self._tools is None or not self._tools.has_libvorbis:
+        target = self.settings.output_format()
+        if self._tools is None or not self._tools.supports(target):
             self.statusBar().showMessage(
-                "ffmpeg が使えないため変換を開始できません。", 8000
+                f"ffmpeg が {target.label} に対応していないため変換を開始できません。", 8000
             )
             self._update_ffmpeg_banner()
             return False
@@ -552,7 +706,10 @@ class MainWindow(QMainWindow):
             return False
 
         queued = self.model.mark_queued(targets)
-        jobs = [ConversionJob(path=item.path, info=item.info) for item in queued]
+        jobs = [
+            ConversionJob(path=item.path, info=item.info, edit=item.edit)
+            for item in queued
+        ]
 
         self._total_jobs = len(jobs)
         self._completed_jobs = 0
@@ -573,9 +730,15 @@ class MainWindow(QMainWindow):
 
         options = self.current_options()
         destination = options.output_dir or "入力ファイルと同じフォルダ"
+        edited = sum(1 for job in jobs if not job.edit.is_default)
+        if edited:
+            self.log(f"うち {edited} 件は編集（切り出し・音量）が入っています。")
         self.log_panel.reset_header()
         self.log(
-            f"{message} (品質 -q:a {options.quality} / 出力先: {destination})",
+            f"{message} ({options.output_format.label} / 品質 {options.quality}"
+            f" -> {options.output_format.encoder} -q:a "
+            f"{options.output_format.encoder_quality(options.quality)}"
+            f" / 出力先: {destination})",
             "info",
         )
         return True
@@ -701,6 +864,13 @@ class MainWindow(QMainWindow):
         self.add_button.setEnabled(not locked)
         # 変換中は開始時点の設定で確定させる
         self.settings.setEnabled(not locked)
+        self.edit_button.setEnabled(not locked)
+        # 変換中は ffmpeg と取り合わないようプレビューを止める
+        self.edit_panel.set_playback_enabled(not locked)
+        if locked:
+            self.edit_panel.setEnabled(False)
+        else:
+            self._sync_edit_panel()
         self.view.set_drop_enabled(not locked)
         self.run_button.setEnabled(True)
         self.run_button.setText("キャンセル" if locked else "変換開始")
@@ -745,6 +915,9 @@ class MainWindow(QMainWindow):
                 parts.append(f"中断 {counts['cancelled']}")
             if counts["error"]:
                 parts.append(f"エラー {counts['error']}")
+            edited = self.model.edited_count()
+            if edited:
+                parts.append(f"編集 {edited}")
             self.summary_label.setText(" / ".join(parts))
         self._update_buttons()
 
@@ -776,9 +949,11 @@ class MainWindow(QMainWindow):
                 + INSTALL_HINT
             )
             self.banner.show()
-        elif not self._tools.has_libvorbis:
+        elif not self._tools.supports(self.settings.output_format()):
+            target = self.settings.output_format()
             self.banner.label.setText(
-                "この ffmpeg は libvorbis を含んでいないため、OGG Vorbis へ変換できません。"
+                f"この ffmpeg は {target.encoder_label} を含んでいないため、"
+                f"{target.label} へ変換できません。"
             )
             self.banner.show()
         else:
@@ -790,6 +965,7 @@ class MainWindow(QMainWindow):
         tools = find_ffmpeg_tools(force_refresh=True)
         self._tools = tools
         self.probe_service.set_tools(tools)
+        self.waveform_service.set_tools(tools)
         self._update_ffmpeg_banner()
         if tools is None:
             self.statusBar().showMessage("ffmpeg はまだ見つかりません。", 6000)
@@ -825,7 +1001,9 @@ class MainWindow(QMainWindow):
                 return
             self.conversion.cancel()
             self.conversion.wait(10_000)
+        self.edit_panel.player.stop()
         self.probe_service.discard_pending()
+        self.waveform_service.cancel_pending()
         # 設定は変更のたびではなく終了時にまとめて書く
         try:
             self.save_config()

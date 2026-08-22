@@ -10,6 +10,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QFileDialog,
     QGridLayout,
     QGroupBox,
@@ -24,12 +25,15 @@ from PySide6.QtWidgets import (
 
 from ..converter import ensure_writable_dir
 from ..errors import OutputPathError
-from ..formats import (
+from ..output_formats import (
+    DEFAULT_OUTPUT_FORMAT,
     DEFAULT_QUALITY,
     MAX_QUALITY,
     MIN_QUALITY,
+    OUTPUT_FORMATS,
+    OutputFormat,
     clamp_quality,
-    nominal_bitrate_bps,
+    output_format_by_key,
 )
 
 #: エラー表示の色
@@ -41,6 +45,8 @@ HINT_COLOR = "#9a9a9a"
 class SettingsPanel(QGroupBox):
     """品質スライダーと出力先の指定をまとめたパネル。"""
 
+    #: 出力形式が変わった
+    output_format_changed = Signal(object)
     #: 品質が変わった（0〜10）
     quality_changed = Signal(int)
     #: 出力先が変わった（None なら入力ファイルと同じフォルダ）
@@ -53,6 +59,7 @@ class SettingsPanel(QGroupBox):
         self._output_dir: Path | None = None
         self._valid = True
         self._last_browse_dir = str(Path.home())
+        self._output_format: OutputFormat = DEFAULT_OUTPUT_FORMAT
 
         self._build()
         self._connect()
@@ -68,8 +75,26 @@ class SettingsPanel(QGroupBox):
         grid.setVerticalSpacing(6)
         grid.setColumnStretch(3, 1)  # パス欄に余白を割り当てる
 
+        # --- 出力形式 ---
+        grid.addWidget(QLabel("出力形式"), 0, 0)
+
+        format_row = QHBoxLayout()
+        format_row.setSpacing(12)
+        self.format_buttons: dict[str, QRadioButton] = {}
+        self._format_group = QButtonGroup(self)
+        for index, fmt in enumerate(OUTPUT_FORMATS):
+            button = QRadioButton(f"{fmt.label} ({fmt.extension})")
+            button.setChecked(fmt is DEFAULT_OUTPUT_FORMAT)
+            self._format_group.addButton(button, index)
+            self.format_buttons[fmt.key] = button
+            format_row.addWidget(button)
+        format_row.addStretch(1)
+        format_holder = QWidget()
+        format_holder.setLayout(format_row)
+        grid.addWidget(format_holder, 0, 1, 1, 4)
+
         # --- 品質 ---
-        grid.addWidget(QLabel("品質 (-q:a)"), 0, 0)
+        grid.addWidget(QLabel("品質 (-q:a)"), 1, 0)
 
         self.quality_slider = QSlider(Qt.Orientation.Horizontal)
         self.quality_slider.setRange(MIN_QUALITY, MAX_QUALITY)
@@ -80,20 +105,21 @@ class SettingsPanel(QGroupBox):
         self.quality_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
         self.quality_slider.setFixedWidth(240)
         self.quality_slider.setToolTip(
-            "OGG Vorbis の品質。大きいほど高音質・大容量になります。"
+            "大きいほど高音質・大容量になります。\n"
+            "出力形式を切り替えても同じ向き（大きい方が高音質）で扱えます。"
         )
-        grid.addWidget(self.quality_slider, 0, 1)
+        grid.addWidget(self.quality_slider, 1, 1)
 
         self.quality_value_label = QLabel()
         self.quality_value_label.setMinimumWidth(56)
-        grid.addWidget(self.quality_value_label, 0, 2)
+        grid.addWidget(self.quality_value_label, 1, 2)
 
         self.quality_hint_label = QLabel()
         self.quality_hint_label.setStyleSheet(f"color: {HINT_COLOR};")
-        grid.addWidget(self.quality_hint_label, 0, 3, 1, 2)
+        grid.addWidget(self.quality_hint_label, 1, 3, 1, 2)
 
         # --- 出力先 ---
-        grid.addWidget(QLabel("出力先"), 1, 0)
+        grid.addWidget(QLabel("出力先"), 2, 0)
 
         choice = QHBoxLayout()
         choice.setSpacing(12)
@@ -104,26 +130,27 @@ class SettingsPanel(QGroupBox):
         choice.addWidget(self.custom_folder_radio)
         holder = QWidget()
         holder.setLayout(choice)
-        grid.addWidget(holder, 1, 1, 1, 2)
+        grid.addWidget(holder, 2, 1, 1, 2)
 
         self.path_edit = QLineEdit()
         self.path_edit.setReadOnly(True)
         self.path_edit.setPlaceholderText("（未指定）")
         self.path_edit.setEnabled(False)
-        grid.addWidget(self.path_edit, 1, 3)
+        grid.addWidget(self.path_edit, 2, 3)
 
         self.browse_button = QPushButton("参照…")
         self.browse_button.setEnabled(False)
-        grid.addWidget(self.browse_button, 1, 4, Qt.AlignmentFlag.AlignLeft)
+        grid.addWidget(self.browse_button, 2, 4, Qt.AlignmentFlag.AlignLeft)
 
         # --- エラー表示 ---
         self.error_label = QLabel()
         self.error_label.setStyleSheet(f"color: {ERROR_COLOR};")
         self.error_label.setWordWrap(True)
         self.error_label.hide()
-        grid.addWidget(self.error_label, 2, 1, 1, 4)
+        grid.addWidget(self.error_label, 3, 1, 1, 4)
 
     def _connect(self) -> None:
+        self._format_group.idToggled.connect(self._on_format_toggled)
         self.quality_slider.valueChanged.connect(self._on_quality_changed)
         self.same_folder_radio.toggled.connect(self._on_mode_toggled)
         self.browse_button.clicked.connect(self.browse_output_dir)
@@ -133,6 +160,17 @@ class SettingsPanel(QGroupBox):
     # ------------------------------------------------------------------
     def quality(self) -> int:
         return self.quality_slider.value()
+
+    def output_format(self) -> OutputFormat:
+        return self._output_format
+
+    def set_output_format(self, fmt: OutputFormat) -> None:
+        """出力形式を切り替える（設定の復元とテストから使う）。"""
+        button = self.format_buttons.get(fmt.key)
+        if button is not None and not button.isChecked():
+            button.setChecked(True)  # ここから _on_format_toggled 経由
+        elif fmt is not self._output_format:
+            self._apply_output_format(fmt)
 
     def output_dir(self) -> Path | None:
         """出力先。None なら入力ファイルと同じフォルダ。"""
@@ -152,6 +190,7 @@ class SettingsPanel(QGroupBox):
         quality: int,
         use_custom_output_dir: bool,
         output_dir: str | Path | None,
+        output_format_key: str | None = None,
     ) -> str | None:
         """保存しておいた設定を復元する。
 
@@ -159,6 +198,9 @@ class SettingsPanel(QGroupBox):
         フォルダを消した等）ので、その場合は「入力と同じフォルダ」に戻し、
         理由を文字列で返す。問題なければ None。
         """
+        restored_format = output_format_by_key(output_format_key)
+        if restored_format is not None:
+            self.set_output_format(restored_format)
         self.quality_slider.setValue(clamp_quality(quality))
 
         if not output_dir:
@@ -209,14 +251,24 @@ class SettingsPanel(QGroupBox):
     # ------------------------------------------------------------------
     # 品質
     # ------------------------------------------------------------------
+    def _on_format_toggled(self, index: int, checked: bool) -> None:
+        if not checked or not 0 <= index < len(OUTPUT_FORMATS):
+            return
+        self._apply_output_format(OUTPUT_FORMATS[index])
+
+    def _apply_output_format(self, fmt: OutputFormat) -> None:
+        self._output_format = fmt
+        # 品質の数値は据え置き。意味（何 kbps 相当か）だけ出し直す
+        self._update_quality_labels(self.quality_slider.value())
+        self.output_format_changed.emit(fmt)
+
     def _on_quality_changed(self, value: int) -> None:
         self._update_quality_labels(value)
         self.quality_changed.emit(value)
 
     def _update_quality_labels(self, value: int) -> None:
         self.quality_value_label.setText(f"品質: {value}")
-        kbps = nominal_bitrate_bps(value, 2) // 1000
-        self.quality_hint_label.setText(f"ステレオでおおよそ {kbps} kbps 相当")
+        self.quality_hint_label.setText(self._output_format.quality_hint(value))
 
     # ------------------------------------------------------------------
     # 出力先

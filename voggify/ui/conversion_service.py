@@ -8,12 +8,13 @@
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 
 from ..converter import ConversionOptions, Converter
+from ..editing import EditSettings
 from ..errors import ConversionCancelled, VoggifyError
 from ..ffmpeg_locator import FFmpegTools
 from ..probe import AudioInfo
@@ -33,6 +34,8 @@ class ConversionJob:
 
     path: Path
     info: AudioInfo | None = None
+    #: このファイルだけの編集内容（トリミング・音量）
+    edit: EditSettings = field(default_factory=EditSettings)
 
 
 class ConversionWorker(QObject):
@@ -83,6 +86,7 @@ class ConversionWorker(QObject):
                     job.path,
                     self._options,
                     info=job.info,
+                    edit=job.edit,
                     on_progress=lambda ratio, p=path_text: self.file_progress.emit(p, ratio),
                     on_log=lambda line, p=path_text: self.file_log.emit(p, line),
                 )

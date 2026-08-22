@@ -16,12 +16,12 @@ from .errors import ProbeError, UnsupportedFormatError, describe_os_error
 from .ffmpeg_locator import FFmpegTools, ensure_ffmpeg_tools, subprocess_flags
 from .formats import (
     EXPECTED_CODECS_BY_EXTENSION,
-    OUTPUT_CODECS,
     SUPPORTED_CODECS,
     SUPPORTED_EXTENSIONS,
     display_codec_name,
     is_supported_extension,
 )
+from .output_formats import DEFAULT_OUTPUT_FORMAT, OutputFormat
 
 
 @dataclass(frozen=True)
@@ -156,18 +156,28 @@ def probe_audio(path: str | os.PathLike[str], tools: FFmpegTools | None = None) 
     )
 
 
-def check_supported(info: AudioInfo, *, strict_extension: bool = True) -> None:
-    """対応フォーマットかを検査し、駄目なら UnsupportedFormatError。"""
+def check_supported(
+    info: AudioInfo,
+    *,
+    strict_extension: bool = True,
+    output_format: OutputFormat | None = None,
+) -> None:
+    """対応フォーマットかを検査し、駄目なら UnsupportedFormatError。
+
+    「既に出力形式と同じ」かどうかは変換先によって変わるので、
+    output_format を見て判定する（MP3 出力なら MP3 入力を弾く）。
+    """
+    target = output_format or DEFAULT_OUTPUT_FORMAT
+
     if strict_extension and not is_supported_extension(info.path.name):
         allowed = "、".join(sorted(e.lstrip(".").upper() for e in SUPPORTED_EXTENSIONS))
         raise UnsupportedFormatError(
             f"対応していない拡張子です: {info.path.name}\n  対応: {allowed}"
         )
-    if info.codec_name in OUTPUT_CODECS:
-        # Ogg コンテナは受け付けるが、中身が既に Vorbis なら変換する意味が無い。
-        # 再エンコードすると音質が落ちるだけなのでここで止める。
+    if info.codec_name in target.same_as_output_codecs:
+        # 出力と同じ形式。再エンコードしても音質が落ちるだけなので止める。
         raise UnsupportedFormatError(
-            f"既に OGG Vorbis です: {info.path.name}\n"
+            f"既に {target.label} です: {info.path.name}\n"
             "  変換する必要はありません（再エンコードすると音質が落ちます）。"
         )
     if info.codec_name not in SUPPORTED_CODECS:
@@ -182,8 +192,11 @@ def inspect(
     tools: FFmpegTools | None = None,
     *,
     strict_extension: bool = True,
+    output_format: OutputFormat | None = None,
 ) -> AudioInfo:
     """解析と対応判定をまとめて行う。GUI からはこれを呼ぶ。"""
     info = probe_audio(path, tools)
-    check_supported(info, strict_extension=strict_extension)
+    check_supported(
+        info, strict_extension=strict_extension, output_format=output_format
+    )
     return info

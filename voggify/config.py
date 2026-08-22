@@ -27,7 +27,13 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .formats import DEFAULT_QUALITY, MAX_QUALITY, MIN_QUALITY
+from .output_formats import (
+    DEFAULT_OUTPUT_FORMAT,
+    DEFAULT_QUALITY,
+    MAX_QUALITY,
+    MIN_QUALITY,
+    output_format_by_key,
+)
 
 #: 設定ファイルの形式バージョン。
 #: 互換性の無い変更をしたら +1 して _migrate() に変換処理を足す。
@@ -83,20 +89,26 @@ class AppConfig:
     """保存する設定一式。未設定の項目はここが既定値になる。"""
 
     quality: int = DEFAULT_QUALITY
+    #: 出力形式の識別子（"ogg" / "mp3"）
+    output_format: str = DEFAULT_OUTPUT_FORMAT.key
     #: True なら output_dir を使う。False なら入力ファイルと同じフォルダ
     use_custom_output_dir: bool = False
     #: 最後に選んだ出力先。use_custom_output_dir が False でも覚えておく
     output_dir: str | None = None
     log_visible: bool = False
+    #: 編集パネルの開閉。編集の中身自体はファイル固有なので保存しない。
+    edit_panel_visible: bool = False
     window: WindowGeometry | None = None
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {
             "config_version": CONFIG_VERSION,
             "quality": self.quality,
+            "output_format": self.output_format,
             "use_custom_output_dir": self.use_custom_output_dir,
             "output_dir": self.output_dir,
             "log_visible": self.log_visible,
+            "edit_panel_visible": self.edit_panel_visible,
         }
         data["window"] = asdict(self.window) if self.window else None
         return data
@@ -202,11 +214,21 @@ def config_from_dict(data: dict[str, Any]) -> tuple[AppConfig, list[str]]:
         )
         quality = DEFAULT_QUALITY
 
+    format_key = _read_optional_str(data, "output_format", warnings)
+    if format_key is not None and output_format_by_key(format_key) is None:
+        warnings.append(
+            f"output_format が不明です（{format_key!r}）。"
+            f"既定の {DEFAULT_OUTPUT_FORMAT.label} を使います。"
+        )
+        format_key = None
+
     config = AppConfig(
         quality=quality,
+        output_format=format_key or DEFAULT_OUTPUT_FORMAT.key,
         use_custom_output_dir=_read_bool(data, "use_custom_output_dir", False, warnings),
         output_dir=_read_optional_str(data, "output_dir", warnings),
         log_visible=_read_bool(data, "log_visible", False, warnings),
+        edit_panel_visible=_read_bool(data, "edit_panel_visible", False, warnings),
         window=_read_geometry(data, warnings),
     )
 

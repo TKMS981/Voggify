@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Final
 
+from . import output_formats as _out
+
 #: 受け付ける拡張子（小文字・ドット付き）。
 #: .ogg / .oga は Ogg コンテナなので中身が Vorbis 以外（Opus / FLAC / Speex）の
 #: ときだけ変換対象になる。中身が Vorbis のものは出力と同じ形式なので弾く。
@@ -33,14 +35,20 @@ SUPPORTED_CODECS: Final[frozenset[str]] = frozenset(
         "pcm_s32be",
         "adpcm_ms",
         "adpcm_ima_wav",
-        # Ogg コンテナに入りうる Vorbis 以外のコーデック
+        # Ogg コンテナに入りうるコーデック。
+        # vorbis も入力としては対応する（MP3 へ変換できる）。
+        # 出力と同じ形式かどうかは OutputFormat.same_as_output_codecs で見る。
+        "vorbis",
         "opus",
         "speex",
     }
 )
 
-#: 出力と同じ形式。入力として受け取っても変換する意味が無いので弾く。
-OUTPUT_CODECS: Final[frozenset[str]] = frozenset({"vorbis"})
+#: 出力できる形式のコーデック全部。どれかに当たる入力は
+#: 「その形式へは変換不要」の判定対象になる（実際の可否は出力形式ごとに決まる）。
+ALL_OUTPUT_CODECS: Final[frozenset[str]] = frozenset(
+    codec for fmt in _out.OUTPUT_FORMATS for codec in fmt.same_as_output_codecs
+)
 
 #: 拡張子から素直に期待されるコーデック。
 #: ここに載っていない組み合わせは「拡張子と実体の食い違い」として注記する。
@@ -86,27 +94,15 @@ CODEC_DISPLAY_NAMES: Final[dict[str, str]] = {
     "adpcm_ima_wav": "ADPCM",
 }
 
-#: libvorbis の -q:a に対する公称ビットレート（kbps / 44.1kHz ステレオ基準）
-VORBIS_NOMINAL_KBPS: Final[dict[int, int]] = {
-    0: 64,
-    1: 80,
-    2: 96,
-    3: 112,
-    4: 128,
-    5: 160,
-    6: 192,
-    7: 224,
-    8: 256,
-    9: 320,
-    10: 500,
-}
+#: 品質スケールと既定の出力形式は output_formats.py が持つ。
+#: ここでは従来どおりの名前で使えるように再エクスポートしている。
+MIN_QUALITY = _out.MIN_QUALITY
+MAX_QUALITY = _out.MAX_QUALITY
+DEFAULT_QUALITY = _out.DEFAULT_QUALITY
+clamp_quality = _out.clamp_quality
 
-MIN_QUALITY: Final[int] = 0
-MAX_QUALITY: Final[int] = 10
-DEFAULT_QUALITY: Final[int] = 6
-
-#: OGG Vorbis の出力拡張子
-OUTPUT_EXTENSION: Final[str] = ".ogg"
+#: 既定の出力拡張子（形式を指定しない場合に使う）
+OUTPUT_EXTENSION: Final[str] = _out.DEFAULT_OUTPUT_FORMAT.extension
 
 
 def is_supported_extension(filename: str) -> bool:
@@ -128,37 +124,26 @@ def display_codec_name(codec_name: str) -> str:
     return codec_name.upper()
 
 
-def clamp_quality(quality: int) -> int:
-    """品質値を 0〜10 に丸める。"""
-    return max(MIN_QUALITY, min(MAX_QUALITY, int(quality)))
-
-
-def nominal_bitrate_bps(quality: int, channels: int = 2) -> int:
-    """指定品質での想定ビットレート（bps）を返す。
-
-    公称値は 44.1kHz ステレオ基準なので、モノラルはおおよそ 0.6 倍、
-    3ch 以上はチャンネル数に比例するものとして補正する。
-    """
-    kbps = VORBIS_NOMINAL_KBPS[clamp_quality(quality)]
-    if channels <= 1:
-        factor = 0.6
-    else:
-        factor = channels / 2.0
-    return int(kbps * 1000 * factor)
+def nominal_bitrate_bps(
+    quality: int, channels: int = 2, output_format: "_out.OutputFormat | None" = None
+) -> int:
+    """指定品質での想定ビットレート（bps）を返す。"""
+    fmt = output_format or _out.DEFAULT_OUTPUT_FORMAT
+    return fmt.nominal_bitrate_bps(quality, channels)
 
 
 def estimate_output_size(
     duration_sec: float | None,
     quality: int,
     channels: int = 2,
+    output_format: "_out.OutputFormat | None" = None,
 ) -> int | None:
     """変換後のファイルサイズ（バイト）を概算する。
 
     再生時間が不明な場合は None を返す。VBR なので誤差は数割ある前提。
     """
-    if duration_sec is None or duration_sec <= 0:
-        return None
-    return int(nominal_bitrate_bps(quality, channels) * duration_sec / 8)
+    fmt = output_format or _out.DEFAULT_OUTPUT_FORMAT
+    return fmt.estimate_size(duration_sec, quality, channels)
 
 
 def format_estimated_size(size: int | None) -> str:
