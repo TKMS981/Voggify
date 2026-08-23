@@ -65,12 +65,22 @@ def send(widget, kind, x, y=None, button=Qt.MouseButton.LeftButton):
     QApplication.instance().sendEvent(widget, event)
 
 
-def drag(widget, x0, x1, steps=6):
-    send(widget, QMouseEvent.Type.MouseButtonPress, x0)
+def drag(widget, x0, x1, steps=6, y=None):
+    send(widget, QMouseEvent.Type.MouseButtonPress, x0, y)
     for i in range(1, steps + 1):
-        send(widget, QMouseEvent.Type.MouseMove, x0 + (x1 - x0) * i / steps)
-    send(widget, QMouseEvent.Type.MouseButtonRelease, x1)
+        send(widget, QMouseEvent.Type.MouseMove, x0 + (x1 - x0) * i / steps, y)
+    send(widget, QMouseEvent.Type.MouseButtonRelease, x1, y)
     pump()
+
+
+def ruler_y(widget) -> int:
+    """目盛り帯（範囲選択の掴み代）の中ほどの y 座標。"""
+    return widget.height() - RULER_HEIGHT // 2
+
+
+def drag_range(widget, x0, x1, steps=6):
+    """範囲選択のドラッグ。目盛り帯を掴む。"""
+    drag(widget, x0, x1, steps, y=ruler_y(widget))
 
 
 # ---------------------------------------------------------------------------
@@ -119,7 +129,7 @@ def test_drag_selects_a_range(view):
     committed = []
     view.range_committed.connect(lambda s, e: committed.append((s, e)))
 
-    drag(view, view.width() * 0.25, view.width() * 0.75)
+    drag_range(view, view.width() * 0.25, view.width() * 0.75)
 
     start, end = view.selection()
     assert start == pytest.approx(7.5, abs=0.5)
@@ -129,7 +139,7 @@ def test_drag_selects_a_range(view):
 
 def test_drag_backwards_still_orders_the_range(view):
     view.set_waveform(make_data(30.0), 30.0)
-    drag(view, view.width() * 0.8, view.width() * 0.2)
+    drag_range(view, view.width() * 0.8, view.width() * 0.2)
     start, end = view.selection()
     assert start < end
     assert start == pytest.approx(6.0, abs=0.5)
@@ -144,8 +154,9 @@ def test_a_plain_click_does_not_change_the_range(view):
     view.range_committed.connect(lambda s, e: committed.append((s, e)))
 
     x = view.width() * 0.5
-    send(view, QMouseEvent.Type.MouseButtonPress, x)
-    send(view, QMouseEvent.Type.MouseButtonRelease, x + DRAG_THRESHOLD_PX - 1)
+    y = ruler_y(view)
+    send(view, QMouseEvent.Type.MouseButtonPress, x, y)
+    send(view, QMouseEvent.Type.MouseButtonRelease, x + DRAG_THRESHOLD_PX - 1, y)
     pump()
 
     assert committed == []
@@ -184,7 +195,7 @@ def test_handles_cannot_cross(view):
 
 def test_selection_stays_within_the_file(view):
     view.set_waveform(make_data(30.0), 30.0)
-    drag(view, -200, view.width() + 400)
+    drag_range(view, -200, view.width() + 400)
     start, end = view.selection()
     assert start >= 0.0
     assert end <= 30.0
@@ -252,7 +263,7 @@ def test_dragging_updates_the_numeric_fields(window, workspace):
     wait_until(lambda: window.edit_panel.waveform.has_waveform, 60)
 
     wave = window.edit_panel.waveform
-    drag(wave, wave.width() * 0.2, wave.width() * 0.6)
+    drag_range(wave, wave.width() * 0.2, wave.width() * 0.6)
 
     item = item_named(window, "sample.flac")
     assert item.edit.has_trim
@@ -283,7 +294,7 @@ def test_reset_button_restores_the_whole_waveform(window, workspace):
     select_only(window, 0)
     wait_until(lambda: window.edit_panel.waveform.has_waveform, 60)
 
-    drag(window.edit_panel.waveform, 100, 300)
+    drag_range(window.edit_panel.waveform, 100, 300)
     assert item_named(window, "sample.flac").edit.has_trim
 
     window.edit_panel.reset_trim_button.click()
@@ -360,3 +371,143 @@ def test_cache_stays_small(window, workspace):
 
     assert window.waveform_service.cache.count == 3
     assert window.waveform_service.cache.nbytes < 100_000
+
+
+# ---------------------------------------------------------------------------
+# 再生カーソルの追従
+# ---------------------------------------------------------------------------
+#: 再生位置の通知が来る間隔（実測でおよそ 50ms）
+POSITION_INTERVAL = 0.05
+
+
+def _count_repaints(widget, duration: float, seconds: float = 2.0) -> int:
+    """位置通知を実測どおりの間隔で流し、再描画された回数を返す。"""
+    widget.set_waveform(make_data(duration, buckets=3000), duration)
+    widget.set_playhead(0.0)  # 1 回目は必ず描かれるので、数える前に済ませておく
+
+    calls: list[int] = []
+    original = widget.update
+    widget.update = lambda *a, **k: calls.append(1)
+    try:
+        elapsed = 0.0
+        while elapsed < seconds:
+            elapsed += POSITION_INTERVAL
+            widget.set_playhead(elapsed)
+    finally:
+        widget.update = original
+    return len(calls)
+
+
+def _expected_repaints(widget, duration: float, seconds: float = 2.0) -> float:
+    """その長さなら何 px 動くか＝何回描き直すのが正しいか。"""
+    seconds_per_pixel = duration / widget.width()
+    moved_px = seconds / seconds_per_pixel
+    # 通知の回数より多くは描けない
+    return min(moved_px, seconds / POSITION_INTERVAL)
+
+
+def test_playhead_repaints_while_playing_a_long_file(view):
+    """長いファイルでもカーソルが動く（＝再描画が起きる）こと。
+
+    1px 未満の移動は間引くが、その判定の基準は「最後に描いた位置」で
+    なければならない。基準を毎回いまの位置に進めてしまうと差分が 1px を
+    超えず、カーソルが止まって見える。4 分の動画は通知 1 回あたり
+    0.5px 程度しか動かないので、5 秒のテスト音源では取りこぼす。
+
+    なお playhead() の値は不具合があっても正しく進むため、
+    「描き直されたか」を見ないとこの退行は捕まえられない。
+    """
+    duration = 240.0
+    repaints = _count_repaints(view, duration)
+    expected = _expected_repaints(view, duration)
+    assert expected >= 4, "テストの前提（4px 以上動く長さ）が崩れています"
+    assert repaints >= expected * 0.5, (
+        f"カーソルがほとんど描き直されていない（{repaints} 回 / 期待 {expected:.0f} 回）"
+    )
+
+
+def test_playhead_repaints_every_notification_when_short(view):
+    """短いファイルでは通知のたびに動く（間引きに掛からない）。"""
+    repaints = _count_repaints(view, 5.0)
+    assert repaints == pytest.approx(2.0 / POSITION_INTERVAL, abs=1)
+
+
+def test_playhead_repaint_is_throttled(view):
+    """間引き自体は効いていること（1px あたり 1 回に抑える）。"""
+    duration = 240.0
+    repaints = _count_repaints(view, duration)
+    notifications = 2.0 / POSITION_INTERVAL
+    assert repaints < notifications, "間引きが効いていない"
+    assert repaints <= _expected_repaints(view, duration) + 1
+
+
+def test_playhead_matches_what_is_drawn(view):
+    """playhead() は実際に描いた位置を返す（ずれは 1px 相当まで）。"""
+    duration = 240.0
+    view.set_waveform(make_data(duration, buckets=3000), duration)
+    elapsed = 0.0
+    while elapsed < 2.0:
+        view.set_playhead(elapsed)
+        elapsed += POSITION_INTERVAL
+    drawn = view.playhead()
+    assert drawn is not None
+    assert abs(drawn - elapsed) <= duration / view.width() + POSITION_INTERVAL
+
+
+# ---------------------------------------------------------------------------
+# 再生カーソルのドラッグ（スクラブ）と範囲選択の分離
+# ---------------------------------------------------------------------------
+def test_dragging_the_wave_moves_the_playhead_only(view):
+    """波形の上のドラッグは再生カーソルだけを動かし、範囲には触らない。"""
+    view.set_waveform(make_data(30.0), 30.0)
+    view.set_range(5.0, 25.0)
+    committed = []
+    scrubbed = []
+    view.range_committed.connect(lambda s, e: committed.append((s, e)))
+    view.playhead_moved.connect(scrubbed.append)
+
+    drag(view, view.width() * 0.2, view.width() * 0.6)   # y は波形の中ほど
+
+    assert view.selection() == pytest.approx((5.0, 25.0)), "範囲が動いてしまった"
+    assert committed == [], "範囲の確定シグナルが出ている"
+    assert scrubbed, "スクラブのシグナルが出ていない"
+    assert view.playhead() == pytest.approx(18.0, abs=0.5)
+
+
+def test_dragging_the_ruler_selects_a_range_only(view):
+    """目盛り帯のドラッグは範囲だけを変え、再生カーソルは動かさない。"""
+    view.set_waveform(make_data(30.0), 30.0)
+    view.set_playhead(3.0)
+    scrubbed = []
+    view.playhead_moved.connect(scrubbed.append)
+
+    drag_range(view, view.width() * 0.25, view.width() * 0.75)
+
+    assert view.selection()[0] == pytest.approx(7.5, abs=0.5)
+    assert scrubbed == [], "範囲選択でスクラブが起きている"
+    assert view.playhead() == pytest.approx(3.0, abs=0.01), "カーソルが動いた"
+
+
+def test_handles_are_grabbable_from_the_ruler(view):
+    """端のハンドルは目盛り帯からも掴める（微調整しやすいように）。"""
+    view.set_waveform(make_data(30.0), 30.0)
+    view.set_range(6.0, 24.0)
+    drag(view, view.width() * 0.2, view.width() * 0.4, y=ruler_y(view))
+    start, end = view.selection()
+    assert start == pytest.approx(12.0, abs=0.5)
+    assert end == pytest.approx(24.0, abs=0.3)
+
+
+def test_scrubbing_wins_over_playback_updates(view):
+    """掴んでいる間は再生側の位置通知でカーソルを引き戻さない。"""
+    view.set_waveform(make_data(30.0), 30.0)
+    send(view, QMouseEvent.Type.MouseButtonPress, view.width() * 0.5)
+    send(view, QMouseEvent.Type.MouseMove, view.width() * 0.5)
+
+    view.set_playhead(1.0)   # 再生中の通知が割り込んできた想定
+    assert view.playhead() == pytest.approx(15.0, abs=0.5), "指の位置が奪われた"
+
+    send(view, QMouseEvent.Type.MouseButtonRelease, view.width() * 0.5)
+    pump()
+    view.set_playhead(1.0)   # 離した後は従来どおり追従する
+    assert view.playhead() == pytest.approx(1.0, abs=0.01)

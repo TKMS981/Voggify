@@ -1,4 +1,17 @@
-"""波形の表示とドラッグでの範囲選択。
+"""波形の表示、再生カーソルのスクラブ、ドラッグでの範囲選択。
+
+操作の分担
+----------
+ドラッグする場所で意味を変える。同じ場所に 2 つの意味を持たせると
+「切り出しを直したいだけなのに再生位置が飛ぶ」といった取り違えが起きるため。
+
+===============  ==========================================
+掴む場所          動作
+===============  ==========================================
+波形の上          再生カーソルを動かす（スクラブ）
+下の目盛り帯      切り出し範囲を新しく引く
+橙のハンドル      切り出しの端を動かす（どちらの帯でも掴める）
+===============  ==========================================
 
 描画コスト対策
 --------------
@@ -39,12 +52,17 @@ OUTSIDE_FILL = QColor(18, 19, 22, 165)
 HANDLE_COLOR = QColor(235, 150, 70)
 RULER_TEXT = QColor(150, 156, 164)
 RULER_LINE = QColor(70, 76, 84)
+#: 目盛り帯の下地。ここが範囲選択の掴み代であることを見せる
+RULER_BACKGROUND = QColor(38, 41, 46)
+#: 目盛り帯のうち、選択範囲に当たる部分
+RULER_SELECTED = QColor(70, 96, 120)
 PLACEHOLDER_TEXT = QColor(140, 146, 154)
 #: 再生位置のカーソル
 PLAYHEAD_COLOR = QColor(250, 250, 250)
 
-#: 目盛りの高さ（下端に確保する）
-RULER_HEIGHT = 18
+#: 目盛りの高さ（下端に確保する）。ここは範囲選択の掴み代も兼ねるので、
+#: 文字が入るだけでなくドラッグしやすい高さにしてある。
+RULER_HEIGHT = 22
 #: ハンドルの掴みやすさ（この距離内なら掴んだ扱い）
 HANDLE_GRAB_PX = 7
 #: ハンドルの描画幅
@@ -62,13 +80,20 @@ class WaveformView(QWidget):
     range_committed = Signal(float, float)
     #: 動かさずにクリックされた。その位置から再生してほしい
     seek_requested = Signal(float)
+    #: 波形をドラッグして再生カーソルを動かしている（スクラブ）
+    playhead_moved = Signal(float)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setMinimumHeight(96)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setMouseTracking(True)
-        self.setCursor(Qt.CursorShape.IBeamCursor)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip(
+            "波形をドラッグ: 再生位置を動かす\n"
+            "下の目盛りをドラッグ: 切り出す範囲を選ぶ\n"
+            "橙の縦線をドラッグ: 範囲の端を微調整"
+        )
 
         self._data: WaveformData | None = None
         self._duration: float = 0.0
@@ -83,8 +108,8 @@ class WaveformView(QWidget):
         self._pixmap: QPixmap | None = None
         self._pixmap_key: tuple | None = None
 
-        #: ドラッグの状態
-        self._dragging: str | None = None  # "new" / "start" / "end"
+        #: ドラッグの状態。"scrub"（再生カーソル）/ "new"（範囲）/ "start" / "end"
+        self._dragging: str | None = None
         self._press_x: int | None = None
 
     # ------------------------------------------------------------------
@@ -119,7 +144,13 @@ class WaveformView(QWidget):
         self._invalidate()
 
     def set_playhead(self, seconds: float | None) -> None:
-        """再生位置のカーソルを動かす。None で消える。"""
+        """再生位置のカーソルを動かす。None で消える。
+
+        スクラブ中は掴んでいる指の位置を優先する（再生側からの通知で
+        カーソルが引き戻されると、掴んだ感触が壊れるため）。
+        """
+        if self._dragging == "scrub":
+            return
         if seconds is None:
             if self._playhead is None:
                 return
@@ -127,10 +158,13 @@ class WaveformView(QWidget):
             self.update()
             return
         clamped = max(0.0, min(self._duration, seconds))
-        # 1px 未満の移動では描き直さない
+        # 1px 未満の移動では描き直さない。
+        # このとき _playhead は進めないこと。進めてしまうと比較の基準が
+        # 毎回いまの位置に移り、差分が 1px を超えないまま止まって見える
+        # （長いファイルほど 1px あたりの秒数が大きく、通知 1 回の移動が
+        # 1px に満たなくなる。4 分の動画で約 0.3px）。
         if self._playhead is not None and self._duration > 0:
             if abs(self._x_of(clamped) - self._x_of(self._playhead)) < 1.0:
-                self._playhead = clamped
                 return
         self._playhead = clamped
         self.update()
@@ -280,6 +314,18 @@ class WaveformView(QWidget):
         if self._duration <= 0:
             return
         top = self.height() - RULER_HEIGHT
+        # 帯の下地。ここが掴める場所であることを見せる。
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(RULER_BACKGROUND))
+        painter.drawRect(QRectF(0, top, self.width(), self.height() - top))
+        # 選択中の範囲は帯の上でも色を変える（どこを掴めば直せるかの手掛かり）
+        if self._duration > 0 and (self._start > 0 or self._end < self._duration):
+            left = self._x_of(self._start)
+            painter.setBrush(QBrush(RULER_SELECTED))
+            painter.drawRect(
+                QRectF(left, top, max(1.0, self._x_of(self._end) - left), 3)
+            )
+
         painter.setPen(QPen(RULER_LINE, 1))
         painter.drawLine(0, top, self.width(), top)
 
@@ -317,18 +363,49 @@ class WaveformView(QWidget):
             return "end"
         return None
 
+    def _on_ruler(self, y: int) -> bool:
+        """目盛り帯（範囲選択の掴み代）の上か。"""
+        return y >= self.height() - RULER_HEIGHT
+
+    def _zone(self, x: int, y: int) -> str:
+        """その座標を掴んだら何が始まるか。
+
+        ハンドルはどちらの帯でも掴める（目盛り側で端を微調整できたほうが
+        都合がよいため）。それ以外は帯で分かれる。
+        """
+        handle = self._hit_handle(x)
+        if handle is not None:
+            return handle
+        return "new" if self._on_ruler(y) else "scrub"
+
+    _CURSORS = {
+        "start": Qt.CursorShape.SizeHorCursor,
+        "end": Qt.CursorShape.SizeHorCursor,
+        "new": Qt.CursorShape.IBeamCursor,
+        "scrub": Qt.CursorShape.PointingHandCursor,
+    }
+
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         x = int(event.position().x())
+        y = int(event.position().y())
         if self._dragging is None:
-            if self._data is not None and self._hit_handle(x):
-                self.setCursor(QCursor(Qt.CursorShape.SizeHorCursor))
-            else:
-                self.setCursor(QCursor(Qt.CursorShape.IBeamCursor))
+            shape = (
+                self._CURSORS[self._zone(x, y)]
+                if self._data is not None
+                else Qt.CursorShape.ArrowCursor
+            )
+            self.setCursor(QCursor(shape))
             return
 
         if self._data is None:
             return
         seconds = self._seconds_at(x)
+        if self._dragging == "scrub":
+            # 再生カーソルだけを動かす。範囲には触らない。
+            self._playhead = seconds
+            self.update()
+            self.playhead_moved.emit(seconds)
+            return
         if self._dragging == "start":
             self._start = min(seconds, self._end - _min_span(self._duration))
             self._start = max(0.0, self._start)
@@ -347,32 +424,41 @@ class WaveformView(QWidget):
             return
         x = int(event.position().x())
         self._press_x = x
-        self._dragging = self._hit_handle(x) or "new"
-        if self._dragging == "new":
-            # 動かさずに離したら「全体」に戻さないよう、まだ変更しない
-            pass
+        self._dragging = self._zone(x, int(event.position().y()))
+        if self._dragging == "scrub":
+            # 押した時点で掴んだ位置へ飛ばす（つまみを持つ感覚に合わせる）
+            seconds = self._seconds_at(x)
+            self._playhead = seconds
+            self.update()
+            self.playhead_moved.emit(seconds)
+            return
         self.setCursor(QCursor(Qt.CursorShape.SizeHorCursor))
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if self._dragging is None:
             return
+        x = int(event.position().x())
         moved = (
             self._press_x is not None
-            and abs(int(event.position().x()) - self._press_x) >= DRAG_THRESHOLD_PX
+            and abs(x - self._press_x) >= DRAG_THRESHOLD_PX
         )
-        was_new = self._dragging == "new"
+        was = self._dragging
         self._dragging = None
         self._press_x = None
-        self.setCursor(QCursor(Qt.CursorShape.IBeamCursor))
+        self.setCursor(QCursor(self._CURSORS[self._zone(x, int(event.position().y()))]))
 
-        if was_new and not moved:
-            # 範囲は変えず、その位置から再生してもらう
-            self.seek_requested.emit(self._seconds_at(int(event.position().x())))
+        if was == "scrub":
+            # 動かしてもクリックだけでも、離した位置から再生してもらう
+            self.seek_requested.emit(self._seconds_at(x))
+            return
+        if was == "new" and not moved:
+            # 目盛りを弾いただけ。範囲は変えず、その位置から再生する
+            self.seek_requested.emit(self._seconds_at(x))
             return
         self.range_committed.emit(self._start, self._end)
 
     def leaveEvent(self, event) -> None:  # noqa: N802, ANN001
-        self.setCursor(QCursor(Qt.CursorShape.IBeamCursor))
+        self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         super().leaveEvent(event)
 
 

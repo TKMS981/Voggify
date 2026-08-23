@@ -13,6 +13,7 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QGridLayout,
     QGroupBox,
@@ -43,6 +44,10 @@ HINT_COLOR = "#9a9a9a"
 
 #: スライダーは整数しか扱えないので 0.1dB 単位の整数に写す
 VOLUME_STEPS_PER_DB = 10
+
+#: リピートの折り返し判定に使う余裕（秒）。
+#: 再生位置の通知は 50ms 間隔なので、それより小さいと折り返しを取りこぼす。
+LOOP_EPSILON = 0.05
 
 
 class EditPanel(QGroupBox):
@@ -109,9 +114,16 @@ class EditPanel(QGroupBox):
         )
         grid.addWidget(self.play_button, 3, 0, 1, 2)
 
+        self.loop_check = QCheckBox("🔁 区間をリピート")
+        self.loop_check.setToolTip(
+            "切り出す範囲の終わりまで来たら、開始位置へ戻って繰り返します。\n"
+            "範囲を調整しながら聴き比べるときに使います。"
+        )
+        grid.addWidget(self.loop_check, 3, 2)
+
         self.play_status_label = QLabel()
         self.play_status_label.setStyleSheet(f"color: {HINT_COLOR};")
-        grid.addWidget(self.play_status_label, 3, 2, 1, 4)
+        grid.addWidget(self.play_status_label, 3, 3, 1, 3)
 
         # --- トリミング ---
         grid.addWidget(QLabel("切り出し"), 4, 0)
@@ -175,8 +187,9 @@ class EditPanel(QGroupBox):
         self.waveform.range_changed.connect(self._on_waveform_dragging)
         self.waveform.range_committed.connect(self._on_waveform_committed)
         self.waveform.seek_requested.connect(self._on_seek_requested)
-        self.play_button.clicked.connect(self.player.toggle)
-        self.player.position_changed.connect(self.waveform.set_playhead)
+        self.waveform.playhead_moved.connect(self._on_playhead_scrubbed)
+        self.play_button.clicked.connect(self._on_play_clicked)
+        self.player.position_changed.connect(self._on_position_changed)
         self.player.playing_changed.connect(self._on_playing_changed)
         self.player.failed.connect(self._on_playback_failed)
         # 入力欄は「確定したとき」に検証する（打っている途中で弾かない）
@@ -386,11 +399,59 @@ class EditPanel(QGroupBox):
     # 再生
     # ------------------------------------------------------------------
     def _on_seek_requested(self, seconds: float) -> None:
-        """波形をクリックされた。その位置から再生する。"""
+        """波形／目盛りを離された。その位置から再生する。"""
         if not self.isEnabled():
             return
         self.waveform.set_playhead(seconds)
         self.player.play_from(seconds)
+
+    def _on_playhead_scrubbed(self, seconds: float) -> None:
+        """波形をドラッグして再生カーソルを動かしている最中。
+
+        掴んでいる間も音を追従させる（どこを掴んでいるか耳で分かるように）。
+        範囲には触らないので、切り出しの値は変わらない。
+        """
+        if not self.isEnabled():
+            return
+        self.player.seek(seconds)
+
+    def _on_play_clicked(self) -> None:
+        """再生ボタン。リピート中に範囲の外から始めないよう寄せる。"""
+        if not self.player.is_playing and self._loop_should_restart():
+            self.player.play_from(self._edit.trim_start)
+            return
+        self.player.toggle()
+
+    def _loop_should_restart(self) -> bool:
+        """いまの再生位置がリピート範囲の外か。"""
+        if not self.loop_check.isChecked():
+            return False
+        start, end = self._loop_range()
+        if end is None:
+            return False
+        position = self.player.position()
+        return position < start - LOOP_EPSILON or position >= end - LOOP_EPSILON
+
+    def _loop_range(self) -> tuple[float, float | None]:
+        """繰り返す範囲。終端が分からなければ (start, None)。"""
+        return self._edit.trim_start, self._edit.effective_end(self._source_duration)
+
+    def _on_position_changed(self, seconds: float) -> None:
+        """再生位置の通知。リピートの折り返しをここで見る。
+
+        QMediaPlayer の通知はおよそ 50ms 間隔なので、範囲の終端を
+        わずかに過ぎてから戻ることがある。手前で折り返すと切り出しの
+        最後が聞けないので、超えてから戻す。
+        """
+        if self.loop_check.isChecked():
+            start, end = self._loop_range()
+            if end is not None and seconds >= end - LOOP_EPSILON:
+                self.waveform.set_playhead(start)
+                self.player.seek(start)
+                if not self.player.is_playing:
+                    self.player.play()
+                return
+        self.waveform.set_playhead(seconds)
 
     def _on_playing_changed(self, playing: bool) -> None:
         self.play_button.setText("⏸ 一時停止" if playing else "▶ 再生")

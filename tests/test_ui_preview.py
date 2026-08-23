@@ -400,3 +400,82 @@ def test_preview_cannot_start_during_conversion(window, workspace):
 
     window.cancel_conversion()
     wait_for_conversion(window, timeout=20)
+
+
+# ---------------------------------------------------------------------------
+# 区間リピート
+# ---------------------------------------------------------------------------
+def test_loop_is_off_by_default(window, workspace):
+    window.set_edit_panel_visible(True)
+    load_files(window, workspace.copy("sample.mp3"))
+    select_only(window, 0)
+    assert not window.edit_panel.loop_check.isChecked()
+
+
+def test_loop_returns_to_the_start_of_the_range(window, workspace):
+    """終端まで来たら開始位置へ戻って鳴り続ける。"""
+    window.set_edit_panel_visible(True)
+    load_files(window, workspace.copy("long.mp3"))
+    select_only(window, 0)
+    panel = window.edit_panel
+    panel.player.set_volume_db(-120)      # 無音で回す
+
+    # 10.0〜11.0 秒の 1 秒だけを繰り返す
+    panel.start_edit.setText("0:10.000")
+    panel.end_edit.setText("0:11.000")
+    panel.end_edit.editingFinished.emit()
+    pump()
+    panel.loop_check.setChecked(True)
+
+    panel.player.play_from(10.7)
+    assert wait_playing(panel.player)
+
+    # 折り返しが起きるまで待つ（終端を越えたら 10.0 付近へ戻る）
+    wait_until(
+        lambda: panel.player.position() < 10.5,
+        20,
+        "リピートの折り返しが起きない",
+    )
+    assert panel.player.is_playing, "折り返した後も鳴り続けるはず"
+    assert panel.player.position() < 11.2
+
+
+def test_loop_off_plays_past_the_range(window, workspace):
+    """チェックを外していれば従来どおり範囲を越えて再生する。"""
+    window.set_edit_panel_visible(True)
+    load_files(window, workspace.copy("long.mp3"))
+    select_only(window, 0)
+    panel = window.edit_panel
+    panel.player.set_volume_db(-120)
+
+    panel.start_edit.setText("0:10.000")
+    panel.end_edit.setText("0:11.000")
+    panel.end_edit.editingFinished.emit()
+    pump()
+    assert not panel.loop_check.isChecked()
+
+    panel.player.play_from(10.7)
+    assert wait_playing(panel.player)
+    wait_until(lambda: panel.player.position() > 11.3, 20, "範囲を越えない")
+
+
+def test_play_button_jumps_into_the_range_when_looping(window, workspace):
+    """リピート中に範囲の外から押したら、範囲の先頭から始める。"""
+    window.set_edit_panel_visible(True)
+    load_files(window, workspace.copy("long.mp3"))
+    select_only(window, 0)
+    panel = window.edit_panel
+    panel.player.set_volume_db(-120)
+
+    panel.start_edit.setText("0:20.000")
+    panel.end_edit.setText("0:22.000")
+    panel.end_edit.editingFinished.emit()
+    pump()
+    panel.loop_check.setChecked(True)
+
+    panel.player.seek(0.0)      # 範囲の外
+    pump(0.2)
+    panel.play_button.click()
+    assert wait_playing(panel.player)
+    wait_until(lambda: panel.player.position() >= 20.0, 15, "範囲の先頭へ飛ばない")
+    assert panel.player.position() < 23.0
