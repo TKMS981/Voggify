@@ -16,7 +16,12 @@ from pathlib import Path
 from .converter import ConversionOptions, Converter
 from .editing import EditSettings
 from .errors import VoggifyError
-from .ffmpeg_locator import ensure_ffmpeg_tools, find_ffmpeg_tools, missing_ffmpeg_message
+from .ffmpeg_locator import (
+    ensure_ffmpeg_tools,
+    find_ffmpeg_tools,
+    missing_encoder_message,
+    missing_ffmpeg_message,
+)
 from .formats import estimate_output_size, format_bytes, format_duration
 from .output_formats import (
     DEFAULT_OUTPUT_FORMAT,
@@ -46,12 +51,14 @@ def cmd_check(_args: argparse.Namespace) -> int:
         return 1
     print("ffmpeg を検出しました:")
     print("  " + tools.describe())
-    missing = [f.label for f in OUTPUT_FORMATS if not tools.supports(f)]
-    if missing:
+    unsupported = [f for f in OUTPUT_FORMATS if not tools.supports(f)]
+    if unsupported:
         print(
             "\n警告: エンコーダーが足りないため、次の形式へは変換できません: "
-            + "、".join(missing)
+            + "、".join(f.label for f in unsupported)
         )
+        # 対処方法まで出す（OS ごとに案内が変わる）
+        print(missing_encoder_message(unsupported[0], tools.ffmpeg))
         return 1
     return 0
 

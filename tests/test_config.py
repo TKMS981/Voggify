@@ -35,14 +35,61 @@ def test_config_dir_follows_the_environment_override(isolated_config):
     assert config_path() == isolated_config / "config.json"
 
 
-def test_config_dir_uses_appdata_on_windows(monkeypatch, tmp_path):
+def _fake_home(monkeypatch, home: Path) -> None:
+    """Path.home() を差し替える。"""
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+
+
+@pytest.fixture
+def no_override(monkeypatch):
+    """保存先の環境変数を外す（autouse の isolated_config を打ち消す）。
+
+    ここでは OS ごとの既定の置き場所そのものを見たいので、
+    テスト用の上書きが効いていると意味が無い。
+    """
     monkeypatch.delenv(ENV_CONFIG_DIR, raising=False)
-    if sys.platform == "win32":
-        monkeypatch.setenv("APPDATA", str(tmp_path))
-        assert config_dir() == tmp_path / "Voggify"
-    else:
-        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
-        assert config_dir() == tmp_path / "Voggify"
+
+
+# OS ごとの既定の場所。sys.platform を差し替えて、実行中の OS に関係なく
+# 3 分岐すべてを検証する（Mac で走らせても Windows の分岐が通るように）。
+def test_config_dir_uses_appdata_on_windows(monkeypatch, tmp_path, no_override):
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+
+    assert config_dir() == tmp_path / "Voggify"
+
+
+def test_config_dir_falls_back_to_roaming_without_appdata(monkeypatch, tmp_path, no_override):
+    """%APPDATA% が無いときは AppData\\Roaming を組み立てる。"""
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.delenv("APPDATA", raising=False)
+    _fake_home(monkeypatch, tmp_path)
+
+    assert config_dir() == tmp_path / "AppData" / "Roaming" / "Voggify"
+
+
+def test_config_dir_uses_application_support_on_macos(monkeypatch, tmp_path, no_override):
+    """macOS は XDG ではなく ~/Library/Application Support。"""
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "should-be-ignored"))
+    _fake_home(monkeypatch, tmp_path)
+
+    assert config_dir() == tmp_path / "Library" / "Application Support" / "Voggify"
+
+
+def test_config_dir_uses_xdg_on_linux(monkeypatch, tmp_path, no_override):
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+
+    assert config_dir() == tmp_path / "Voggify"
+
+
+def test_config_dir_falls_back_to_dot_config_on_linux(monkeypatch, tmp_path, no_override):
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    _fake_home(monkeypatch, tmp_path)
+
+    assert config_dir() == tmp_path / ".config" / "Voggify"
 
 
 # ---------------------------------------------------------------------------
