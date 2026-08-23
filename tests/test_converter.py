@@ -206,7 +206,9 @@ def test_rejects_unwritable_output_dir(converter, workspace):
         with pytest.raises(OutputPathError) as excinfo:
             converter.convert(source, ConversionOptions(output_dir=denied))
     message = excinfo.value.user_message
-    assert "書き込めません" in message
+    # 文言は 2 通りある。POSIX は os.access で弾いて「書き込み権限がありません」、
+    # Windows は os.access が当てにならないので実際に書いてみて「書き込めません」
+    assert "出力先フォルダに書き込" in message
     # 内部の書き込みテスト用ファイル名を漏らさない
     assert ".voggify_write_test" not in message
 

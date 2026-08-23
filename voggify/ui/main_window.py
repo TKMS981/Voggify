@@ -30,7 +30,13 @@ from PySide6.QtWidgets import (
 from .. import __app_name__, __version__
 from ..config import AppConfig, WindowGeometry, save_config
 from ..converter import ConversionOptions
-from ..ffmpeg_locator import FFmpegTools, find_ffmpeg_tools, missing_ffmpeg_message
+from ..ffmpeg_locator import (
+    FFmpegTools,
+    encoder_install_hint,
+    find_ffmpeg_tools,
+    missing_encoder_message,
+    missing_ffmpeg_message,
+)
 from ..formats import SUPPORTED_EXTENSIONS, format_bytes
 from ..models import FileStatus
 from ..resources import icon_path
@@ -59,7 +65,8 @@ def _install_hint() -> str:
     if sys.platform == "win32":
         return "コマンドプロンプトで  winget install Gyan.FFmpeg  を実行するとインストールできます。"
     if sys.platform == "darwin":
-        return "ターミナルで  brew install ffmpeg  を実行するとインストールできます。"
+        # 素の ffmpeg は libvorbis 抜きなので ffmpeg-full を案内する
+        return "ターミナルで  brew install ffmpeg-full  を実行するとインストールできます。"
     return "端末で  sudo apt install ffmpeg  などを実行するとインストールできます。"
 
 
@@ -990,9 +997,11 @@ class MainWindow(QMainWindow):
             self.banner.show()
         elif not self._tools.supports(self.settings.output_format()):
             target = self.settings.output_format()
+            # 対処方法まで出す（詳細は「インストール方法」ボタン）
             self.banner.label.setText(
                 f"この ffmpeg は {target.encoder_label} を含んでいないため、"
-                f"{target.label} へ変換できません。"
+                f"{target.label} へ変換できません。\n"
+                + encoder_install_hint(target)
             )
             self.banner.show()
         else:
@@ -1021,8 +1030,14 @@ class MainWindow(QMainWindow):
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Icon.Information)
         box.setWindowTitle("ffmpeg のインストール")
-        box.setText("Voggify の変換には ffmpeg が必要です。")
-        box.setDetailedText(missing_ffmpeg_message())
+        target = self.settings.output_format()
+        if self._tools is not None and not self._tools.supports(target):
+            # ffmpeg 自体はあるので、足りないのはエンコーダーだけ
+            box.setText(f"{target.label} への変換には {target.encoder_label} が必要です。")
+            box.setDetailedText(missing_encoder_message(target, self._tools.ffmpeg))
+        else:
+            box.setText("Voggify の変換には ffmpeg が必要です。")
+            box.setDetailedText(missing_ffmpeg_message())
         box.exec()
 
     # ------------------------------------------------------------------
