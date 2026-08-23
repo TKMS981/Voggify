@@ -6,11 +6,16 @@ from typing import Final
 
 from . import output_formats as _out
 
+#: 動画コンテナの拡張子。中の音声トラックだけを取り出して変換する。
+#: 音声ファイルと違い「拡張子から期待されるコーデック」が定まらないので、
+#: 食い違いの注記は出さない（EXPECTED_CODECS_BY_EXTENSION に載せない）。
+VIDEO_EXTENSIONS: Final[frozenset[str]] = frozenset({".mp4", ".mkv"})
+
 #: 受け付ける拡張子（小文字・ドット付き）。
 #: .ogg / .oga は Ogg コンテナなので中身が Vorbis 以外（Opus / FLAC / Speex）の
 #: ときだけ変換対象になる。中身が Vorbis のものは出力と同じ形式なので弾く。
 SUPPORTED_EXTENSIONS: Final[frozenset[str]] = frozenset(
-    {".mp3", ".wav", ".flac", ".aac", ".m4a", ".ogg", ".oga"}
+    {".mp3", ".wav", ".flac", ".aac", ".m4a", ".ogg", ".oga"} | VIDEO_EXTENSIONS
 )
 
 #: ffprobe が返す codec_name のうち、入力として許可するもの。
@@ -41,6 +46,14 @@ SUPPORTED_CODECS: Final[frozenset[str]] = frozenset(
         "vorbis",
         "opus",
         "speex",
+        # MP4 / MKV に入りうる音声コーデック。ffmpeg はいずれもデコードできる
+        # （エンコーダーは不要。Voggify は常に OGG / MP3 へ再エンコードする）。
+        "ac3",
+        "eac3",
+        "dts",
+        "truehd",
+        "mp2",
+        "wmav2",
     }
 )
 
@@ -92,7 +105,38 @@ CODEC_DISPLAY_NAMES: Final[dict[str, str]] = {
     "pcm_f64le": "PCM float64",
     "adpcm_ms": "ADPCM",
     "adpcm_ima_wav": "ADPCM",
+    "ac3": "AC-3",
+    "eac3": "E-AC-3",
+    "dts": "DTS",
+    "truehd": "TrueHD",
+    "mp2": "MP2",
+    "wmav2": "WMA",
 }
+
+#: 音声トラックの language タグ → 画面表示用の名前。
+#: ffprobe は ISO 639-2/B の 3 文字（jpn / eng）で返すことが多いが、
+#: MP4 では 2 文字（ja / en）のこともあるので両方を引けるようにしている。
+#: 表に無いタグはそのまま大文字で出す（"tha" → "THA"）。
+LANGUAGE_NAMES: Final[dict[str, str]] = {
+    "jpn": "日本語", "ja": "日本語",
+    "eng": "英語", "en": "英語",
+    "chi": "中国語", "zho": "中国語", "zh": "中国語",
+    "kor": "韓国語", "ko": "韓国語",
+    "fre": "フランス語", "fra": "フランス語", "fr": "フランス語",
+    "ger": "ドイツ語", "deu": "ドイツ語", "de": "ドイツ語",
+    "spa": "スペイン語", "es": "スペイン語",
+    "ita": "イタリア語", "it": "イタリア語",
+    "por": "ポルトガル語", "pt": "ポルトガル語",
+    "rus": "ロシア語", "ru": "ロシア語",
+    "tha": "タイ語", "th": "タイ語",
+    "vie": "ベトナム語", "vi": "ベトナム語",
+    "ind": "インドネシア語", "id": "インドネシア語",
+    "ara": "アラビア語", "ar": "アラビア語",
+    "hin": "ヒンディー語", "hi": "ヒンディー語",
+}
+
+#: 「言語不明」を表すタグ。これらは言語名として扱わない。
+UNKNOWN_LANGUAGE_TAGS: Final[frozenset[str]] = frozenset({"und", "unk", "mis", "zxx"})
 
 #: 品質スケールと既定の出力形式は output_formats.py が持つ。
 #: ここでは従来どおりの名前で使えるように再エクスポートしている。
@@ -109,6 +153,25 @@ def is_supported_extension(filename: str) -> bool:
     """拡張子だけで大まかに判定する（D&D 時の一次フィルタ用）。"""
     lowered = filename.lower()
     return any(lowered.endswith(ext) for ext in SUPPORTED_EXTENSIONS)
+
+
+def is_video_extension(filename: str) -> bool:
+    """動画コンテナの拡張子か（音声トラックを取り出す対象か）。"""
+    lowered = filename.lower()
+    return any(lowered.endswith(ext) for ext in VIDEO_EXTENSIONS)
+
+
+def display_language_name(language: str | None) -> str | None:
+    """language タグを画面表示用の名前にする。
+
+    不明・未設定なら None（呼び出し側でトラック番号にフォールバックする）。
+    """
+    if not language:
+        return None
+    tag = language.strip().lower()
+    if not tag or tag in UNKNOWN_LANGUAGE_TAGS:
+        return None
+    return LANGUAGE_NAMES.get(tag, tag.upper())
 
 
 def display_codec_name(codec_name: str) -> str:

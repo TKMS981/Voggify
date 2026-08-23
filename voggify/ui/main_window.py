@@ -51,7 +51,7 @@ from .waveform_service import WaveformService
 
 def _file_dialog_filter() -> str:
     patterns = " ".join(f"*{ext}" for ext in sorted(SUPPORTED_EXTENSIONS))
-    return f"音楽ファイル ({patterns});;すべてのファイル (*)"
+    return f"音楽・動画ファイル ({patterns});;すべてのファイル (*)"
 
 
 def _install_hint() -> str:
@@ -522,7 +522,9 @@ class MainWindow(QMainWindow):
                 )
             return
 
-        self.edit_panel.set_target(item.name, item.edit, item.source_duration)
+        self.edit_panel.set_target(
+            item.name, item.edit, item.source_duration, item.audio_tracks
+        )
         self.edit_panel.set_source_path(item.path)
         self._request_waveform(item)
 
@@ -532,21 +534,28 @@ class MainWindow(QMainWindow):
             self.edit_panel.set_waveform(None, "長さが不明なため波形を表示できません。")
             return
         cached = self.waveform_service.request(
-            item.path, item.source_duration, item.info.sample_rate
+            item.path,
+            item.source_duration,
+            item.info.sample_rate,
+            item.edit.audio_track,
         )
         if cached is not None:
             self.edit_panel.set_waveform(cached)
         else:
             self.edit_panel.set_waveform(None, "波形を読み込み中…")
 
-    def _on_waveform_ready(self, path: str, data: object, message: str) -> None:
-        """生成が終わった。まだ同じ行が選ばれていれば反映する。"""
+    def _on_waveform_ready(
+        self, path: str, track: int, data: object, message: str
+    ) -> None:
+        """生成が終わった。まだ同じ行・同じトラックが選ばれていれば反映する。"""
         rows = self.view.selected_rows()
         if len(rows) != 1:
             return
         item = self.model.item_at(rows[0])
         if item is None or str(item.path) != path:
             return  # 選択が変わっていたので捨てる
+        if item.edit.audio_track != track:
+            return  # トラックが切り替わっていたので捨てる
         if data is None:
             self.edit_panel.set_waveform(None, message or "波形を生成できませんでした。")
             if message:
@@ -555,20 +564,46 @@ class MainWindow(QMainWindow):
             self.edit_panel.set_waveform(data)  # type: ignore[arg-type]
 
     def _on_edit_changed(self, edit: object) -> None:
-        """パネルの変更を選択中の行に書き戻す。"""
+        """パネルの変更を選択中の行に書き戻す。
+
+        音声トラックが変わった場合は、波形とプレビューも選択トラックの
+        ものに差し替える（キャッシュはトラックごとに分かれている）。
+        """
         rows = self.view.selected_rows()
         if len(rows) != 1:
             return
+        previous = self.model.item_at(rows[0])
+        previous_track = previous.edit.audio_track if previous is not None else 0
+
         item = self.model.set_edit(rows[0], edit)
         if item is None:
             return
-        description = item.edit.describe(item.source_duration)
+
+        if item.edit.audio_track != previous_track:
+            self._on_track_changed(item)
+
+        selected = item.selected_track
+        description = item.edit.describe(
+            item.source_duration, selected.label if selected is not None else ""
+        )
         if description:
             self.statusBar().showMessage(
                 f"{item.name}: " + description.replace("\n", " / "), 6000
             )
         else:
             self.statusBar().showMessage(f"{item.name}: 編集を解除しました。", 4000)
+
+    def _on_track_changed(self, item) -> None:  # noqa: ANN001
+        """音声トラックが切り替わった。波形とプレビューを差し替える。"""
+        self.edit_panel.player.set_audio_track(item.edit.audio_track)
+        self._request_waveform(item)
+        track = item.selected_track
+        if track is not None:
+            self.log(
+                f"{item.name}: 音声トラック {track.number}"
+                f"（{track.label} / {track.detail}）を選択しました。",
+                "info",
+            )
 
     # ------------------------------------------------------------------
     # ログパネル

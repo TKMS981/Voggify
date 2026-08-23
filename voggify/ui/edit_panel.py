@@ -1,7 +1,11 @@
-"""簡易編集（トリミング・音量）のパネル。
+"""簡易編集（音声トラック・トリミング・音量）のパネル。
 
 一覧で 1 行だけ選ばれているときに有効になり、その行の編集内容を出す。
 未選択・複数選択のときは中身を空にして無効化する。
+
+音声トラックの選択欄は、そのファイルが 2 本以上の音声を持つときだけ出す。
+1 本しか無いファイル（通常の音楽ファイルは全部これ）では欄ごと隠すので、
+見た目は今までと変わらない。
 """
 
 from __future__ import annotations
@@ -9,6 +13,7 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
+    QComboBox,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -27,6 +32,7 @@ from ..editing import (
     format_timecode,
     parse_timecode,
 )
+from ..probe import AudioTrack
 from ..waveform import WaveformData
 from .preview_player import PreviewPlayer, boost_is_capped
 from .waveform_view import WaveformView
@@ -50,6 +56,7 @@ class EditPanel(QGroupBox):
         self._edit = EditSettings()
         self._source_duration: float | None = None
         self._file_name: str = ""
+        self._tracks: tuple[AudioTrack, ...] = ()
         #: 反映中のシグナルで再入しないためのフラグ
         self._loading = False
 
@@ -74,9 +81,24 @@ class EditPanel(QGroupBox):
         self.target_label.setStyleSheet(f"color: {HINT_COLOR};")
         grid.addWidget(self.target_label, 0, 0, 1, 6)
 
+        # --- 音声トラック（2 本以上あるときだけ出す）---
+        self.track_label = QLabel("音声トラック")
+        grid.addWidget(self.track_label, 1, 0)
+
+        self.track_combo = QComboBox()
+        self.track_combo.setMinimumWidth(320)
+        self.track_combo.setToolTip(
+            "変換・波形・プレビューの対象にする音声トラックを選びます。"
+        )
+        grid.addWidget(self.track_combo, 1, 1, 1, 4)
+
+        self.track_hint_label = QLabel()
+        self.track_hint_label.setStyleSheet(f"color: {HINT_COLOR};")
+        grid.addWidget(self.track_hint_label, 1, 5)
+
         # --- 波形（ドラッグで範囲を選ぶ）---
         self.waveform = WaveformView()
-        grid.addWidget(self.waveform, 1, 0, 1, 6)
+        grid.addWidget(self.waveform, 2, 0, 1, 6)
 
         # --- 再生（波形のすぐ下）---
         self.play_button = QPushButton("▶ 再生")
@@ -85,38 +107,38 @@ class EditPanel(QGroupBox):
             "元のファイルをそのまま再生します。\n"
             "波形をクリックするとその位置から再生します。"
         )
-        grid.addWidget(self.play_button, 2, 0, 1, 2)
+        grid.addWidget(self.play_button, 3, 0, 1, 2)
 
         self.play_status_label = QLabel()
         self.play_status_label.setStyleSheet(f"color: {HINT_COLOR};")
-        grid.addWidget(self.play_status_label, 2, 2, 1, 4)
+        grid.addWidget(self.play_status_label, 3, 2, 1, 4)
 
         # --- トリミング ---
-        grid.addWidget(QLabel("切り出し"), 3, 0)
+        grid.addWidget(QLabel("切り出し"), 4, 0)
 
         self.start_edit = QLineEdit()
         self.start_edit.setFixedWidth(110)
         self.start_edit.setAlignment(Qt.AlignmentFlag.AlignRight)
         self.start_edit.setToolTip("開始位置（mm:ss.ms）")
-        grid.addWidget(self.start_edit, 3, 1)
+        grid.addWidget(self.start_edit, 4, 1)
 
-        grid.addWidget(QLabel("〜"), 3, 2)
+        grid.addWidget(QLabel("〜"), 4, 2)
 
         self.end_edit = QLineEdit()
         self.end_edit.setFixedWidth(110)
         self.end_edit.setAlignment(Qt.AlignmentFlag.AlignRight)
         self.end_edit.setToolTip("終了位置（mm:ss.ms）")
-        grid.addWidget(self.end_edit, 3, 3)
+        grid.addWidget(self.end_edit, 4, 3)
 
         self.reset_trim_button = QPushButton("全体を使う")
-        grid.addWidget(self.reset_trim_button, 3, 4)
+        grid.addWidget(self.reset_trim_button, 4, 4)
 
         self.length_label = QLabel()
         self.length_label.setStyleSheet(f"color: {HINT_COLOR};")
-        grid.addWidget(self.length_label, 3, 5)
+        grid.addWidget(self.length_label, 4, 5)
 
         # --- 音量 ---
-        grid.addWidget(QLabel("音量"), 4, 0)
+        grid.addWidget(QLabel("音量"), 5, 0)
 
         self.volume_slider = QSlider(Qt.Orientation.Horizontal)
         self.volume_slider.setRange(
@@ -130,24 +152,24 @@ class EditPanel(QGroupBox):
         self.volume_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
         self.volume_slider.setFixedWidth(240)
         self.volume_slider.setToolTip("-30dB 〜 +30dB")
-        grid.addWidget(self.volume_slider, 4, 1, 1, 3)
+        grid.addWidget(self.volume_slider, 5, 1, 1, 3)
 
         self.reset_volume_button = QPushButton("0 dB に戻す")
-        grid.addWidget(self.reset_volume_button, 4, 4)
+        grid.addWidget(self.reset_volume_button, 5, 4)
 
         self.volume_label = QLabel()
         monospace = QFont("Consolas")
         monospace.setStyleHint(QFont.StyleHint.Monospace)
         self.volume_label.setFont(monospace)
         self.volume_label.setMinimumWidth(80)
-        grid.addWidget(self.volume_label, 4, 5)
+        grid.addWidget(self.volume_label, 5, 5)
 
         # --- エラー ---
         self.error_label = QLabel()
         self.error_label.setStyleSheet(f"color: {ERROR_COLOR};")
         self.error_label.setWordWrap(True)
         self.error_label.hide()
-        grid.addWidget(self.error_label, 5, 1, 1, 5)
+        grid.addWidget(self.error_label, 6, 1, 1, 5)
 
     def _connect(self) -> None:
         self.waveform.range_changed.connect(self._on_waveform_dragging)
@@ -163,6 +185,7 @@ class EditPanel(QGroupBox):
         self.reset_trim_button.clicked.connect(self.reset_trim)
         self.volume_slider.valueChanged.connect(self._on_volume_slider)
         self.reset_volume_button.clicked.connect(self.reset_volume)
+        self.track_combo.currentIndexChanged.connect(self._on_track_selected)
 
     # ------------------------------------------------------------------
     # 対象の切り替え
@@ -185,8 +208,12 @@ class EditPanel(QGroupBox):
         self.waveform.set_volume_db(self._edit.volume_db)
 
     def set_source_path(self, path) -> None:  # noqa: ANN001
-        """再生するファイルを差し替える（再生中なら止まる）。"""
-        self.player.set_source(path)
+        """再生するファイルを差し替える（再生中なら止まる）。
+
+        選択中の音声トラックも一緒に渡すので、読み込み後にそのトラックへ
+        切り替わる。
+        """
+        self.player.set_source(path, self._edit.audio_track)
 
     def set_playback_enabled(self, enabled: bool) -> None:
         """変換中はプレビューを止めておく。"""
@@ -203,10 +230,13 @@ class EditPanel(QGroupBox):
         file_name: str | None,
         edit: EditSettings | None,
         source_duration: float | None,
+        tracks: "tuple[AudioTrack, ...] | None" = None,
     ) -> None:
         """パネルが編集する対象を差し替える。
 
         file_name が None なら「対象なし」として無効化する。
+        tracks はそのファイルの音声トラック一覧で、2 本以上あるときだけ
+        選択欄を出す。
         """
         self.player.stop()
         self._loading = True
@@ -215,6 +245,8 @@ class EditPanel(QGroupBox):
                 self._file_name = ""
                 self._edit = EditSettings()
                 self._source_duration = None
+                self._tracks = ()
+                self._rebuild_track_combo()
                 self.setEnabled(False)
                 self.target_label.setText(
                     "ファイルを 1 つ選ぶと、その範囲と音量を編集できます。"
@@ -236,6 +268,8 @@ class EditPanel(QGroupBox):
             self._file_name = file_name
             self._edit = edit
             self._source_duration = source_duration
+            self._tracks = tuple(tracks or ())
+            self._rebuild_track_combo()
             self.setEnabled(True)
             self.target_label.setText(
                 f"{file_name}（全体 {format_timecode(source_duration)}）"
@@ -247,7 +281,61 @@ class EditPanel(QGroupBox):
         finally:
             self._loading = False
 
+    # ------------------------------------------------------------------
+    # 音声トラック
+    # ------------------------------------------------------------------
+    def _rebuild_track_combo(self) -> None:
+        """トラック一覧を作り直す。2 本未満なら欄ごと隠す。
+
+        呼び出し側は _loading を立てている前提（再入を防ぐため）。
+        """
+        multiple = len(self._tracks) > 1
+        self.track_label.setVisible(multiple)
+        self.track_combo.setVisible(multiple)
+        self.track_hint_label.setVisible(multiple)
+
+        self.track_combo.clear()
+        if not multiple:
+            self.track_hint_label.setText("")
+            return
+
+        for track, label in zip(self._tracks, _unique_track_labels(self._tracks)):
+            self.track_combo.addItem(f"{label}（{track.detail}）", track.index)
+            position = self.track_combo.count() - 1
+            self.track_combo.setItemData(
+                position,
+                f"-map 0:a:{track.index}（ffprobe のストリーム #{track.stream_index}）",
+                Qt.ItemDataRole.ToolTipRole,
+            )
+        self.track_hint_label.setText(f"全 {len(self._tracks)} 本")
+        self._select_track_in_combo(self._edit.audio_track)
+
+    def _select_track_in_combo(self, track_index: int) -> None:
+        """コンボの選択を編集内容に合わせる。無ければ先頭に寄せる。"""
+        position = self.track_combo.findData(track_index)
+        self.track_combo.setCurrentIndex(position if position >= 0 else 0)
+
+    def _on_track_selected(self, position: int) -> None:
+        """トラックが選び直された。編集内容として確定する。"""
+        if self._loading or not self.isEnabled() or position < 0:
+            return
+        index = self.track_combo.itemData(position)
+        if index is None or index == self._edit.audio_track:
+            return
+        self._set_error("")
+        self._commit(self._edit.with_track(int(index)))
+
+    def selected_track(self) -> "AudioTrack | None":
+        """選択中のトラック。トラック情報が無ければ None。"""
+        for track in self._tracks:
+            if track.index == self._edit.audio_track:
+                return track
+        return None
+
+    # ------------------------------------------------------------------
     def _load_into_widgets(self) -> None:
+        if self.track_combo.isVisible():
+            self._select_track_in_combo(self._edit.audio_track)
         self.start_edit.setText(format_timecode(self._edit.trim_start))
         end = self._edit.effective_end(self._source_duration)
         self.end_edit.setText(format_timecode(end) if end is not None else "")
@@ -405,3 +493,17 @@ class EditPanel(QGroupBox):
     def _set_error(self, message: str) -> None:
         self.error_label.setText(message)
         self.error_label.setVisible(bool(message))
+
+
+def _unique_track_labels(tracks: "tuple[AudioTrack, ...]") -> list[str]:
+    """トラックの表示名を、重複しないように整えて返す。
+
+    同じ言語のトラックが 2 本ある（トラック名も無い）ような場合、
+    そのままでは見分けが付かないので番号を添える。
+    """
+    labels = [track.label for track in tracks]
+    duplicated = {label for label in labels if labels.count(label) > 1}
+    return [
+        f"{label}（トラック{track.number}）" if label in duplicated else label
+        for track, label in zip(tracks, labels)
+    ]

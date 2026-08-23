@@ -62,7 +62,7 @@ def _write_version_resource() -> str:
         '040904B0',
         [
           StringStruct('CompanyName', 'Voggify'),
-          StringStruct('FileDescription', 'Voggify - 音楽ファイルを OGG Vorbis に変換'),
+          StringStruct('FileDescription', 'Voggify - 音楽・動画の音声を OGG Vorbis / MP3 に変換'),
           StringStruct('FileVersion', '{APP_VERSION}'),
           StringStruct('InternalName', '{APP_NAME}'),
           StringStruct('LegalCopyright', 'MIT License'),

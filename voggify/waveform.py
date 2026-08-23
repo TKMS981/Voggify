@@ -70,6 +70,8 @@ class WaveformData:
     duration: float
     peaks: array.array
     sample_rate: int
+    #: どの音声トラックから作ったか（0 始まり）
+    track: int = 0
 
     @property
     def buckets(self) -> int:
@@ -120,11 +122,14 @@ def extract_waveform(
     *,
     buckets: int = DEFAULT_BUCKETS,
     source_rate: int | None = None,
+    track: int = 0,
     cancel: threading.Event | None = None,
 ) -> WaveformData:
     """ffmpeg で PCM を読み出し、バケットごとの min/max に畳む。
 
     duration が分かっている前提（ffprobe 済みの値を渡す）。
+    track は音声トラック番号（0 始まり）で、複数音声を持つ動画から
+    選択中のトラックだけを読むために使う。
     cancel がセットされたら WaveformCancelled を投げる。
     """
     source = Path(path)
@@ -141,7 +146,7 @@ def extract_waveform(
         "-nostdin",
         "-v", "error",
         "-i", str(source),
-        "-map", "0:a:0",
+        "-map", f"0:a:{max(0, track)}",
         "-ac", "1",
         "-ar", str(rate),
         "-f", "s16le",
@@ -215,7 +220,9 @@ def extract_waveform(
     if not peaks:
         raise ProbeError(f"波形を生成できませんでした（音声が空）: {source.name}")
 
-    return WaveformData(duration=duration, peaks=peaks, sample_rate=rate)
+    return WaveformData(
+        duration=duration, peaks=peaks, sample_rate=rate, track=max(0, track)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -227,14 +234,20 @@ CACHE_MAX_ENTRIES = 64
 CACHE_MAX_BYTES = 16 * 1024 * 1024
 
 
-def cache_key(path: str | os.PathLike[str]) -> tuple[str, int, int]:
-    """ファイルの同一性を見るキー。更新されたら作り直す。"""
+def cache_key(
+    path: str | os.PathLike[str], track: int = 0
+) -> tuple[str, int, int, int]:
+    """波形の同一性を見るキー。ファイルが更新されたら作り直す。
+
+    同じファイルでもトラックが違えば別の波形なので、track もキーに含める。
+    """
     resolved = Path(path)
+    track = max(0, int(track))
     try:
         stat = resolved.stat()
-        return (str(resolved), int(stat.st_mtime_ns), int(stat.st_size))
+        return (str(resolved), int(stat.st_mtime_ns), int(stat.st_size), track)
     except OSError:
-        return (str(resolved), 0, 0)
+        return (str(resolved), 0, 0, track)
 
 
 class WaveformCache:
@@ -249,22 +262,28 @@ class WaveformCache:
         max_entries: int = CACHE_MAX_ENTRIES,
         max_bytes: int = CACHE_MAX_BYTES,
     ) -> None:
-        self._entries: OrderedDict[tuple[str, int, int], WaveformData] = OrderedDict()
+        self._entries: OrderedDict[
+            tuple[str, int, int, int], WaveformData
+        ] = OrderedDict()
         self._max_entries = max_entries
         self._max_bytes = max_bytes
         self._bytes = 0
         self._lock = threading.Lock()
 
-    def get(self, path: str | os.PathLike[str]) -> WaveformData | None:
-        key = cache_key(path)
+    def get(
+        self, path: str | os.PathLike[str], track: int = 0
+    ) -> WaveformData | None:
+        key = cache_key(path, track)
         with self._lock:
             data = self._entries.get(key)
             if data is not None:
                 self._entries.move_to_end(key)  # 使ったので新しい側へ
             return data
 
-    def put(self, path: str | os.PathLike[str], data: WaveformData) -> None:
-        key = cache_key(path)
+    def put(
+        self, path: str | os.PathLike[str], data: WaveformData, track: int | None = None
+    ) -> None:
+        key = cache_key(path, data.track if track is None else track)
         with self._lock:
             existing = self._entries.pop(key, None)
             if existing is not None:
@@ -274,13 +293,17 @@ class WaveformCache:
             self._evict()
 
     def discard(self, path: str | os.PathLike[str]) -> bool:
-        """1 件捨てる。一覧から削除されたときに呼ぶ。"""
+        """そのファイルの波形を捨てる。一覧から削除されたときに呼ぶ。
+
+        複数トラックのファイルはトラックごとに載っているので全部落とす。
+        """
         target = str(Path(path))
+        dropped = False
         with self._lock:
             for key in [k for k in self._entries if k[0] == target]:
                 self._bytes -= self._entries.pop(key).nbytes
-                return True
-        return False
+                dropped = True
+        return dropped
 
     def clear(self) -> None:
         with self._lock:

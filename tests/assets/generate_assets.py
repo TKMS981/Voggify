@@ -29,6 +29,10 @@ SAMPLE_SECONDS = 5
 LONG_SECONDS = 300
 LONG_BITRATE = "32k"
 
+#: multi_audio.mkv の各音声トラックの周波数（Hz）。
+#: どのトラックが取り出されたかを、変換結果の周波数で判定できるようにする。
+MULTI_FREQUENCIES = (440, 880, 1320)
+
 #: (ファイル名, ffmpeg の出力オプション)
 SHORT_SAMPLES: tuple[tuple[str, list[str]], ...] = (
     ("sample.wav", ["-c:a", "pcm_s16le"]),
@@ -78,7 +82,7 @@ def main() -> int:
     )
     print("  long.mp3")
 
-    # 映像入り。拡張子で弾かれる側と、拡張子を偽装した側の 2 つを作る
+    # 映像入り。音声 1 本の MP4（拡張子を偽装した fake.mp3 の元にもなる）
     run(
         base
         + ["-f", "lavfi", "-i", f"testsrc=duration={SAMPLE_SECONDS}:size=320x240:rate=10"]
@@ -86,6 +90,46 @@ def main() -> int:
         + ["-c:v", "libx264", "-c:a", "aac", str(HERE / "video.mp4")]
     )
     print("  video.mp4")
+
+    # 音声トラックが 3 本の MKV。言語タグとトラック名を付けて、
+    # 選択 UI の表示名（言語 / トラック名 / 番号フォールバック）を全部試せるようにする。
+    # トラックごとに周波数を変えてあるので、狙ったトラックが出たか音で判定できる。
+    run(
+        base
+        + ["-f", "lavfi", "-i", f"testsrc=duration={SAMPLE_SECONDS}:size=320x240:rate=10"]
+        + ["-f", "lavfi", "-i", f"sine=frequency={MULTI_FREQUENCIES[0]}:duration={SAMPLE_SECONDS}"]
+        + ["-f", "lavfi", "-i", f"sine=frequency={MULTI_FREQUENCIES[1]}:duration={SAMPLE_SECONDS}"]
+        + ["-f", "lavfi", "-i", f"sine=frequency={MULTI_FREQUENCIES[2]}:duration={SAMPLE_SECONDS}"]
+        + ["-map", "0:v", "-map", "1:a", "-map", "2:a", "-map", "3:a"]
+        + ["-c:v", "libx264", "-c:a:0", "aac", "-c:a:1", "aac", "-c:a:2", "libmp3lame"]
+        # a:0 = 言語 + トラック名 / a:1 = 言語のみ / a:2 = タグ無し（番号へ落ちる）
+        + ["-metadata:s:a:0", "language=jpn", "-metadata:s:a:0", "title=Main"]
+        + ["-metadata:s:a:1", "language=eng"]
+        + ["-ac:a:2", "2"]
+        + [str(HERE / "multi_audio.mkv")]
+    )
+    print("  multi_audio.mkv (音声 3 本 / jpn+title, eng, タグ無し)")
+
+    # 音声トラックが 2 本の MP4。MKV 以外でも同じように扱えることの確認用。
+    run(
+        base
+        + ["-f", "lavfi", "-i", f"testsrc=duration={SAMPLE_SECONDS}:size=320x240:rate=10"]
+        + ["-f", "lavfi", "-i", f"sine=frequency=440:duration={SAMPLE_SECONDS}"]
+        + ["-f", "lavfi", "-i", f"sine=frequency=880:duration={SAMPLE_SECONDS}"]
+        + ["-map", "0:v", "-map", "1:a", "-map", "2:a"]
+        + ["-c:v", "libx264", "-c:a", "aac"]
+        + ["-metadata:s:a:0", "language=jpn", "-metadata:s:a:1", "language=eng"]
+        + [str(HERE / "multi_audio.mp4")]
+    )
+    print("  multi_audio.mp4 (音声 2 本 / jpn, eng)")
+
+    # 映像だけで音声が無い MP4。「対応外」としてエラーになることの確認用。
+    run(
+        base
+        + ["-f", "lavfi", "-i", f"testsrc=duration={SAMPLE_SECONDS}:size=320x240:rate=10"]
+        + ["-an", "-c:v", "libx264", str(HERE / "silent_video.mp4")]
+    )
+    print("  silent_video.mp4 (音声トラック無し)")
     # 中身は AAC(mp4) だが拡張子は .mp3 —「拡張子と実体の食い違い」の確認用
     shutil.copyfile(HERE / "video.mp4", HERE / "fake.mp3")
     print("  fake.mp3   (video.mp4 のコピー / 拡張子を偽装)")

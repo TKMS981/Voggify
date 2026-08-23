@@ -96,9 +96,35 @@ class FileItem:
         return self.path.name
 
     @property
+    def audio_tracks(self):
+        """含まれる音声トラック一覧。解析前は空。"""
+        return self.info.tracks if self.info is not None else ()
+
+    @property
+    def has_multiple_tracks(self) -> bool:
+        """音声トラックを 2 本以上持つか（一覧のマークと選択欄の判定）。"""
+        return self.info is not None and self.info.has_multiple_tracks
+
+    @property
+    def selected_track(self):
+        """選択中の音声トラック。解析前・該当なしは None。"""
+        if self.info is None:
+            return None
+        return self.info.track_or_first(self.edit.audio_track)
+
+    @property
     def source_duration(self) -> float | None:
-        """元のファイルの長さ（秒）。解析前は None。"""
-        return self.info.duration_sec if self.info is not None else None
+        """元のファイルの長さ（秒）。解析前は None。
+
+        トラックごとに長さが違うことがあるので、選択中のトラックに
+        値があればそちらを使う（無ければコンテナ全体の長さ）。
+        """
+        if self.info is None:
+            return None
+        track = self.selected_track
+        if track is not None and track.duration_sec:
+            return track.duration_sec
+        return self.info.duration_sec
 
     @property
     def output_duration(self) -> float | None:
@@ -106,15 +132,23 @@ class FileItem:
         return self.edit.effective_duration(self.source_duration)
 
     def display_format(self) -> str:
-        """「現在の形式」列の文字列。食い違いがあれば併記する。"""
+        """「現在の形式」列の文字列。
+
+        複数音声を持つファイルは本数を添えて、選択できることが分かるようにする。
+        食い違いの ⚠ は従来どおり。
+        """
         if self.status is FileStatus.ANALYZING:
             return "解析中…"
         if self.info is None:
             return "-"
+        track = self.selected_track
+        text = track.display_format if track is not None else self.info.display_format
+        if self.has_multiple_tracks:
+            text = f"{text} ♪{self.info.track_count}"
         if self.note:
             # 例: MP3 (.mp3) -> 実体 AAC のとき
-            return f"{self.info.display_format} ⚠"
-        return self.info.display_format
+            text = f"{text} ⚠"
+        return text
 
     def estimated_size(
         self,
@@ -124,8 +158,10 @@ class FileItem:
         """指定品質・形式での変換後サイズ（バイト）。解析前・エラー時は None。"""
         if self.info is None or self.status is FileStatus.ERROR:
             return None
+        track = self.selected_track
+        channels = track.channels if track is not None else self.info.channels
         return estimate_output_size(
-            self.output_duration, quality, self.info.channels, output_format
+            self.output_duration, quality, channels, output_format
         )
 
     def display_size(
@@ -160,8 +196,12 @@ class FileItem:
             return "\n".join(lines)
 
         if self.info is not None:
+            track = self.selected_track
             lines.append("")
-            lines.append(f"形式: {self.info.display_format} ({self.info.format_name})")
+            shown_format = (
+                track.display_format if track is not None else self.info.display_format
+            )
+            lines.append(f"形式: {shown_format} ({self.info.format_name})")
             if self.edit.has_trim:
                 lines.append(
                     f"再生時間: {format_duration(self.info.duration_sec)}"
@@ -170,9 +210,19 @@ class FileItem:
             else:
                 lines.append(f"再生時間: {format_duration(self.info.duration_sec)}")
             lines.append(
-                f"サンプルレート: {self.info.sample_rate or '-'} Hz / "
-                f"{self.info.channels} ch"
+                f"サンプルレート: "
+                f"{(track.sample_rate if track is not None else self.info.sample_rate) or '-'}"
+                f" Hz / {track.channels if track is not None else self.info.channels} ch"
             )
+            if self.has_multiple_tracks:
+                lines.append("")
+                lines.append(f"音声トラック: {self.info.track_count} 本")
+                for candidate in self.info.tracks:
+                    mark = "▶" if track is not None and candidate.index == track.index else "  "
+                    lines.append(
+                        f"{mark} {candidate.number}. {candidate.label}"
+                        f"（{candidate.detail}）"
+                    )
             lines.append(f"現在のサイズ: {format_bytes(self.info.file_size)}")
             if self.status is FileStatus.DONE:
                 lines.append(f"変換後のサイズ: {format_bytes(self.output_size)}")
@@ -182,7 +232,10 @@ class FileItem:
                     f"{format_estimated_size(self.estimated_size(quality, output_format))}"
                     f"（{output_format.label} / 品質 {quality}）"
                 )
-        description = self.edit.describe(self.source_duration)
+        selected = self.selected_track
+        description = self.edit.describe(
+            self.source_duration, selected.label if selected is not None else ""
+        )
         if description:
             lines.append("")
             lines.append("【編集】")

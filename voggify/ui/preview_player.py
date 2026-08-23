@@ -2,7 +2,8 @@
 
 QMediaPlayer + QAudioOutput を使う。PySide6 の Qt Multimedia は FFmpeg を
 バックエンドに持っているため、Voggify が受け付ける形式
-（MP3 / WAV / FLAC / AAC / M4A / OGG / OGA）はそのまま再生できる。
+（MP3 / WAV / FLAC / AAC / M4A / OGG / OGA / MP4 / MKV）はそのまま再生できる。
+動画は映像の出力先（QVideoSink）を繋いでいないので音声だけが鳴る。
 ユーザーが入れた ffmpeg とは別に PySide6 が同梱しているものを使うので、
 ffmpeg 未インストールでもプレビューだけは動く。
 
@@ -15,6 +16,12 @@ ffmpeg の `volume=XdB` フィルタも振幅に 10^(dB/20) を掛けるので�
 
 ただし setVolume は 1.0 で頭打ちになる（実測）。そのため **正の dB では
 プレビューを増幅できない**。減衰側（0dB 以下）は正確に一致する。
+
+音声トラックの選択
+------------------
+複数音声を持つ動画は `QMediaPlayer.setActiveAudioTrack()` で切り替える。
+この指定はメディアの読み込みが済むまで効かないので、シークと同じように
+保留しておいて mediaStatus が Loaded になってから適用する。
 """
 
 from __future__ import annotations
@@ -67,6 +74,8 @@ class PreviewPlayer(QObject):
         self._pending_seek: float | None = None
         #: 読み込み後に自動再生するか
         self._play_when_ready = False
+        #: 再生する音声トラック（0 始まり）。読み込み後に適用する。
+        self._audio_track = 0
 
         if not MULTIMEDIA_AVAILABLE:
             self._player = None
@@ -98,6 +107,17 @@ class PreviewPlayer(QObject):
     def source(self) -> Path | None:
         return self._source
 
+    @property
+    def audio_track(self) -> int:
+        """再生対象の音声トラック（0 始まり）。"""
+        return self._audio_track
+
+    def available_track_count(self) -> int:
+        """Qt が認識している音声トラックの本数（読み込み後に確定する）。"""
+        if self._player is None:
+            return 0
+        return len(self._player.audioTracks())
+
     def position(self) -> float:
         if self._player is None:
             return 0.0
@@ -110,18 +130,44 @@ class PreviewPlayer(QObject):
         if not enabled:
             self.stop()
 
-    def set_source(self, path: Path | None) -> None:
-        """再生対象を差し替える。再生中なら止める。"""
+    def set_source(self, path: Path | None, track: int = 0) -> None:
+        """再生対象を差し替える。再生中なら止める。
+
+        track を渡すと、読み込み後にその音声トラックへ切り替える。
+        """
         if self._player is None:
             return
         self.stop()
         self._pending_seek = None
         self._play_when_ready = False
+        self._audio_track = max(0, int(track))
         self._source = Path(path) if path is not None else None
         if self._source is None:
             self._player.setSource(QUrl())
         else:
             self._player.setSource(QUrl.fromLocalFile(str(self._source)))
+
+    def set_audio_track(self, track: int) -> None:
+        """再生する音声トラックを変える。
+
+        読み込みが終わっていなければ覚えておき、_on_media_status で当てる。
+        再生中に切り替えると Qt 側で一度止まるので、位置は保って入れ直す。
+        """
+        track = max(0, int(track))
+        if track == self._audio_track and self._is_ready():
+            return
+        self._audio_track = track
+        self._apply_audio_track()
+
+    def _apply_audio_track(self) -> None:
+        """保留している音声トラックの指定を実際に当てる。"""
+        if self._player is None or not self._is_ready():
+            return
+        # 音声を持たないメディアや、想定より少ない本数のときは触らない
+        if self._audio_track >= len(self._player.audioTracks()):
+            return
+        if self._player.activeAudioTrack() != self._audio_track:
+            self._player.setActiveAudioTrack(self._audio_track)
 
     def set_volume_db(self, volume_db: float) -> None:
         """音量を dB で設定する。再生中でも即座に効く。"""
@@ -186,9 +232,11 @@ class PreviewPlayer(QObject):
 
     # ------------------------------------------------------------------
     def _on_media_status(self, status) -> None:  # noqa: ANN001
-        """読み込みが済んだら、保留していたシークと再生を実行する。"""
+        """読み込みが済んだら、保留していたトラック・シーク・再生を実行する。"""
         if self._player is None or not self._is_ready():
             return
+        # トラックはシークより先に当てる（切り替えで位置が戻ることがあるため）
+        self._apply_audio_track()
         if self._pending_seek is not None:
             self._player.setPosition(int(self._pending_seek * 1000))
             self._pending_seek = None

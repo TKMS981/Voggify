@@ -16,6 +16,12 @@ ffmpeg への渡し方
 
 音量は `-af volume=XdB`。Voggify は常に再エンコードする（`-c copy` は
 使わない）ので、フィルタを足しても変換の流れは変わらない。
+
+音声トラックの選択
+------------------
+MP4 / MKV は音声トラックを複数持てるので、どれを使うかもファイルごとの
+値としてここに持つ。`-map 0:a:{audio_track}` として渡す。既定の 0 は
+「先頭の音声トラック」で、音声ファイルは常にこれになる。
 """
 
 from __future__ import annotations
@@ -36,6 +42,9 @@ TIME_EPSILON = 0.001
 #: トリミングで残す最短の長さ（秒）。これ以下にはできない。
 MIN_TRIM_DURATION = 0.1
 
+#: 既定の音声トラック（先頭）。音声ファイルは常にこれ。
+DEFAULT_AUDIO_TRACK = 0
+
 
 class EditValueError(ValueError):
     """編集パラメータが不正なときに投げる。UI 側で警告に使う。"""
@@ -51,6 +60,8 @@ class EditSettings:
     trim_end: float | None = None
     #: 音量の増減（dB）。0.0 なら変更なし。
     volume_db: float = DEFAULT_VOLUME_DB
+    #: 使う音声トラック（0 始まり）。`-map 0:a:N` の N。
+    audio_track: int = DEFAULT_AUDIO_TRACK
 
     # ------------------------------------------------------------------
     # 判定
@@ -64,9 +75,22 @@ class EditSettings:
         return abs(self.volume_db) > VOLUME_EPSILON
 
     @property
+    def has_track_selection(self) -> bool:
+        """先頭以外の音声トラックを選んでいるか。"""
+        return self.audio_track != DEFAULT_AUDIO_TRACK
+
+    @property
     def is_default(self) -> bool:
-        """何も編集していない状態か。真なら ffmpeg に余計な引数を足さない。"""
-        return not self.has_trim and not self.has_volume
+        """何も編集していない状態か。真なら ffmpeg に余計な引数を足さない。
+
+        トラック選択も「既定と違う設定」なので含める。-map 自体は常に
+        付けるが、一覧の編集マークとツールチップに出したいため。
+        """
+        return (
+            not self.has_trim
+            and not self.has_volume
+            and not self.has_track_selection
+        )
 
     # ------------------------------------------------------------------
     # 長さ
@@ -109,6 +133,14 @@ class EditSettings:
             args += ["-t", _format_seconds(duration)]
         return args
 
+    def map_args(self) -> list[str]:
+        """使う音声トラックを指定する `-map`。
+
+        映像やカバーアートを落とすために元から常に付けている引数なので、
+        トラックを選んでいない場合も 0:a:0 を返す（従来と同じ）。
+        """
+        return ["-map", f"0:a:{max(0, self.audio_track)}"]
+
     def filter_args(self) -> list[str]:
         """`-af` に渡すフィルタ（音量）。"""
         if not self.has_volume:
@@ -138,23 +170,40 @@ class EditSettings:
     def without_volume(self) -> "EditSettings":
         return replace(self, volume_db=DEFAULT_VOLUME_DB)
 
+    def with_track(self, index: int) -> "EditSettings":
+        """使う音声トラックを差し替える。
+
+        トリミングと音量はトラックが変わっても意味が変わらないので
+        そのまま持ち越す（同じ長さの別音声、という想定）。
+        """
+        return replace(self, audio_track=max(0, int(index)))
+
     # ------------------------------------------------------------------
     # 表示
     # ------------------------------------------------------------------
     def badge(self) -> str:
         """一覧に出す短い印。編集なしなら空文字。"""
         marks: list[str] = []
+        if self.has_track_selection:
+            # 表示は 1 始まり（内部は 0 始まり）
+            marks.append(f"♪{self.audio_track + 1}")
         if self.has_trim:
             marks.append("✂")
         if self.has_volume:
             marks.append(f"{self.volume_db:+.1f}dB")
         return " ".join(marks)
 
-    def describe(self, source_duration: float | None) -> str:
-        """ツールチップ用の説明。編集なしなら空文字。"""
+    def describe(self, source_duration: float | None, track_label: str = "") -> str:
+        """ツールチップ用の説明。編集なしなら空文字。
+
+        track_label にトラックの表示名を渡すと、選択中のトラックも並べる。
+        """
         if self.is_default:
             return ""
         lines: list[str] = []
+        if self.has_track_selection:
+            suffix = f"（{track_label}）" if track_label else ""
+            lines.append(f"音声トラック: {self.audio_track + 1}{suffix}")
         if self.has_trim:
             end = self.effective_end(source_duration)
             lines.append(
@@ -256,6 +305,7 @@ def _format_seconds(seconds: float) -> str:
 
 
 __all__ = [
+    "DEFAULT_AUDIO_TRACK",
     "DEFAULT_VOLUME_DB",
     "EditSettings",
     "EditValueError",

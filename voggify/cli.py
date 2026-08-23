@@ -4,7 +4,7 @@ GUI 実装前の動作確認用だが、完成後もデバッグ用途で残す�
 
   python main.py check
   python main.py info  <file>
-  python main.py convert <file> [-q 0-10] [-o DIR] [--overwrite] [--verbose]
+  python main.py convert <file> [-q 0-10] [-o DIR] [--track N] [--overwrite] [--verbose]
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 
 from .converter import ConversionOptions, Converter
+from .editing import EditSettings
 from .errors import VoggifyError
 from .ffmpeg_locator import ensure_ffmpeg_tools, find_ffmpeg_tools, missing_ffmpeg_message
 from .formats import estimate_output_size, format_bytes, format_duration
@@ -76,6 +77,16 @@ def cmd_info(args: argparse.Namespace) -> int:
         f"  ({target.label} / 品質 {args.quality}"
         f" -> {target.encoder} -q:a {target.encoder_quality(args.quality)})"
     )
+
+    if info.has_multiple_tracks:
+        print(f"\n音声トラック  : {info.track_count} 本")
+        for track in info.tracks:
+            mark = "*" if track.index == 0 else " "
+            print(
+                f"  {mark} --track {track.index}  {track.label}"
+                f"（{track.detail}）"
+            )
+        print("  * 既定（--track を省略したときに使うトラック）")
     return 0
 
 
@@ -88,7 +99,9 @@ def cmd_convert(args: argparse.Namespace) -> int:
     """1 ファイルを OGG Vorbis に変換する。"""
     tools = ensure_ffmpeg_tools()
     target = _resolve_format(args)
-    info = inspect(args.input, tools, output_format=target)
+    track = max(0, getattr(args, "track", 0) or 0)
+    edit = EditSettings(audio_track=track)
+    info = inspect(args.input, tools, output_format=target, track=track)
     options = ConversionOptions(
         quality=args.quality,
         output_dir=Path(args.output_dir) if args.output_dir else None,
@@ -96,9 +109,14 @@ def cmd_convert(args: argparse.Namespace) -> int:
         output_format=target,
     )
 
+    selected = info.track_or_first(track)
+    track_note = ""
+    if info.has_multiple_tracks and selected is not None:
+        track_note = f"  音声トラック {selected.number}（{selected.label}）"
+    shown = selected.display_format if selected is not None else info.display_format
     print(
         f"変換: {info.path.name}  "
-        f"[{info.display_format} -> {target.label} 品質{args.quality}]"
+        f"[{shown} -> {target.label} 品質{args.quality}]{track_note}"
     )
     converter = Converter(tools)
     on_log = (lambda line: print(f"  | {line}")) if args.verbose else None
@@ -108,6 +126,7 @@ def cmd_convert(args: argparse.Namespace) -> int:
             info.path,
             options,
             info=info,
+            edit=edit,
             on_progress=None if args.verbose else _print_progress,
             on_log=on_log,
         )
@@ -131,7 +150,9 @@ def cmd_convert(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="voggify",
-        description="音楽ファイルを OGG Vorbis / MP3 に変換します。",
+        description=(
+            "音楽ファイル・動画ファイルの音声を OGG Vorbis / MP3 に変換します。"
+        ),
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -165,6 +186,13 @@ def build_parser() -> argparse.ArgumentParser:
         "-o", "--output-dir",
         default=None,
         help="出力先フォルダ (既定: 入力ファイルと同じ場所)",
+    )
+    convert.add_argument(
+        "--track",
+        type=int,
+        default=0,
+        metavar="N",
+        help="使う音声トラック (0 始まり / 既定: 0)。一覧は info で確認できる",
     )
     convert.add_argument(
         "--overwrite",

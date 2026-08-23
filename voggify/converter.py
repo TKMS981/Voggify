@@ -132,6 +132,9 @@ def build_command(
     トリミングの `-ss` / `-t` は `-i` の前（入力側）に置く。精度は出力側と
     同じで、離れた位置を切り出すときに速いため（editing.py の説明を参照）。
     編集が既定値なら余計な引数は一切足さない。
+
+    `-map` で選ぶのは音声 1 本だけなので、動画コンテナ（MP4 / MKV）を
+    入力にしても映像とその他のトラックは出力に入らない。
     """
     edit = edit or EditSettings()
     return [
@@ -142,7 +145,7 @@ def build_command(
         "-y",
         *edit.input_args(source_duration),  # トリミング（入力側シーク）
         "-i", str(source),
-        "-map", "0:a:0",       # 先頭の音声ストリームのみ（カバーアート等は除外）
+        *edit.map_args(),      # 使う音声トラック 1 本だけ（映像やカバーアートは除外）
         "-map_metadata", "0",  # タグを引き継ぐ
         *edit.filter_args(),   # 音量調整
         *output_format.encoder_args(quality),
@@ -215,10 +218,20 @@ class Converter:
 
         # 実体を確認して対応フォーマットか判定（未指定なら都度 probe する）
         if info is None:
-            info = inspect(src, self.tools, output_format=options.output_format)
+            info = inspect(
+                src,
+                self.tools,
+                output_format=options.output_format,
+                track=edit.audio_track,
+            )
         else:
-            # 呼び出し側で解析済みでも、出力形式との組み合わせは見直す
-            check_supported(info, output_format=options.output_format)
+            # 呼び出し側で解析済みでも、出力形式との組み合わせは見直す。
+            # 選んだトラックによって可否が変わるので audio_track も渡す。
+            check_supported(
+                info,
+                output_format=options.output_format,
+                track=edit.audio_track,
+            )
 
         destination = resolve_output_path(src, options)
         ensure_writable_dir(destination.parent)

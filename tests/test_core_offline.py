@@ -101,7 +101,8 @@ def test_is_supported_extension(name, supported):
         ("pcm_s8", "PCM"),          # 表に無い PCM 系
         ("adpcm_yamaha", "ADPCM"),  # 表に無い ADPCM 系
         ("alac", "ALAC"),
-        ("ac3", "AC3"),             # 未知はそのまま大文字化
+        ("ac3", "AC-3"),            # 動画コンテナに入る系
+        ("musepack", "MUSEPACK"),   # 未知はそのまま大文字化
     ],
 )
 def test_display_codec_name(codec, shown):
@@ -217,9 +218,9 @@ def test_check_supported_accepts_known_codec():
 
 def test_check_supported_rejects_unknown_codec():
     with pytest.raises(UnsupportedFormatError) as excinfo:
-        check_supported(audio_info("a.m4a", "ac3"))
+        check_supported(audio_info("a.m4a", "musepack"))
     assert "対応していないコーデック" in excinfo.value.user_message
-    assert "AC3" in excinfo.value.user_message
+    assert "MUSEPACK" in excinfo.value.user_message
 
 
 def test_check_supported_rejects_unknown_extension():

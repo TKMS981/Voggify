@@ -83,7 +83,9 @@ def test_folder_drop_collects_supported_files(window, workspace):
     assert set(SHORT_SAMPLES) <= set(names)
     # 対応拡張子でないものは拾わない
     assert "notsupported.opus" not in names
-    assert "video.mp4" not in names
+    # 動画は音声トラックを取り出す対象なので拾う
+    assert "video.mp4" in names
+    assert item_named(window, "video.mp4").status is FileStatus.READY
 
 
 def test_drop_without_urls_is_ignored(window):
