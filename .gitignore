@@ -17,3 +17,6 @@ dist/
 # テストアセットはリポジトリに含める
 !tests/assets/*.ogg
 !tests/assets/*.oga
+
+# macOS が勝手に作るもの
+.DS_Store

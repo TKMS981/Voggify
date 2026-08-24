@@ -9,8 +9,19 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-#: アプリのアイコン（リポジトリからの相対パス）
-ICON_RELATIVE = "assets/icon.ico"
+#: どの OS でも読める既定のアイコン（Qt は .ico も .icns も扱える）
+DEFAULT_ICON_RELATIVE = "assets/icon.ico"
+
+#: OS ごとの native なアイコン。ここで返すのはウィンドウ用
+#: （setWindowIcon）で、macOS の Dock / Finder のアイコンは
+#: .app の CFBundleIconFile＝assets/icon.icns が受け持つ。
+ICON_BY_PLATFORM = {
+    "darwin": "assets/icon.icns",
+    "win32": "assets/icon.ico",
+}
+
+#: 実行中の OS で使うアイコン
+ICON_RELATIVE = ICON_BY_PLATFORM.get(sys.platform, DEFAULT_ICON_RELATIVE)
 
 
 def resource_root() -> Path:
@@ -31,6 +42,13 @@ def resource_path(relative: str) -> Path:
 
 
 def icon_path() -> Path | None:
-    """アプリアイコンのパス。見つからなければ None。"""
-    candidate = resource_path(ICON_RELATIVE)
-    return candidate if candidate.is_file() else None
+    """アプリアイコンのパス。見つからなければ None。
+
+    OS 向けのものが無ければ既定（.ico）へ落とす。片方しか同梱していない
+    ビルドでもアイコン無しにはならないようにするため。
+    """
+    for relative in (ICON_RELATIVE, DEFAULT_ICON_RELATIVE):
+        candidate = resource_path(relative)
+        if candidate.is_file():
+            return candidate
+    return None
