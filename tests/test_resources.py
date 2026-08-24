@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import io
 import struct
+import subprocess
 import sys
 from pathlib import Path
 
@@ -61,6 +63,40 @@ def read_icns_entries(path: Path) -> dict[str, int]:
         entries[ostype.decode("ascii", "replace")] = size
         offset += size
     return entries
+
+
+def read_icns_pngs(path: Path) -> dict[str, "Image.Image"]:
+    """.icns の中の PNG エントリを OSType -> 画像 で返す。
+
+    一番小さい 2 つ（ic04 / ic05）は iconutil が ARGB で書くので PNG では
+    取り出せない。そちらは macOS 限定のテストで iconutil に戻して見る。
+    """
+    from PIL import Image
+
+    data = path.read_bytes()
+    images: dict[str, Image.Image] = {}
+    offset = 8
+    while offset < len(data):
+        ostype, size = struct.unpack(">4sI", data[offset : offset + 8])
+        blob = data[offset + 8 : offset + size]
+        if blob[:8] == PNG_MAGIC:
+            name = ostype.decode("ascii", "replace")
+            images[name] = Image.open(io.BytesIO(blob)).convert("RGBA")
+        offset += size
+    return images
+
+
+def alpha_report(image: "Image.Image") -> tuple[int, int]:
+    """(四隅のアルファの最大値, 中央のアルファ) を返す。"""
+    width, height = image.size
+    pixels = image.load()
+    corners = [
+        pixels[0, 0][3],
+        pixels[width - 1, 0][3],
+        pixels[0, height - 1][3],
+        pixels[width - 1, height - 1][3],
+    ]
+    return max(corners), pixels[width // 2, height // 2][3]
 
 
 def read_ico_entries(path: Path) -> list[tuple[int, int, int]]:
@@ -147,6 +183,83 @@ def test_icns_large_entries_are_png():
             checked += 1
         offset += size
     assert checked == len(expected_px), "PNG の解像度を確認できなかった"
+
+
+def test_icns_corners_are_transparent():
+    """macOS は自動でマスクをかけないので、角丸と透明は画像側に要る。
+
+    iOS と違って OS 側のマスクが無い。四隅が不透明だと Dock で
+    四角いタイルとして表示されてしまう。
+    """
+    images = read_icns_pngs(icns_file())
+    assert images, "PNG エントリが 1 つも取り出せない"
+    for name, image in sorted(images.items()):
+        corner, center = alpha_report(image)
+        assert corner == 0, f"{name}（{image.size[0]}px）の四隅が透明でない: α={corner}"
+        assert center == 255, f"{name}（{image.size[0]}px）の中央が不透明でない: α={center}"
+
+
+def test_icns_follows_the_macos_content_ratio():
+    """実体がキャンバスに占める割合が macOS の慣例どおりであること。
+
+    Apple 純正アイコンの実測値は 79.5%（1024 中 814）。小さい解像度は
+    アンチエイリアスの分だけ下振れするので幅を持たせる。
+    """
+    images = read_icns_pngs(icns_file())
+    for name, image in sorted(images.items()):
+        width = image.size[0]
+        if width < 128:
+            continue  # 小さすぎて縁の判定が粗くなる
+        solid = image.getchannel("A").point(lambda v: 255 if v > 250 else 0)
+        box = solid.getbbox()
+        assert box is not None, f"{name} に不透明部分が無い"
+        ratio = (box[2] - box[0]) / width
+        assert 0.75 <= ratio <= 0.83, (
+            f"{name}（{width}px）の占有率が {ratio:.1%}（75〜83% を期待）"
+        )
+
+
+def test_ico_stays_a_fully_opaque_square():
+    """Windows 側には角丸マスクをかけない。
+
+    .icns の加工が .ico に波及していないことの歯止め。Windows の
+    タスクバーはマスクをかけないので、正方形のままでよい。
+    """
+    from PIL import Image
+
+    for size in (16, 256):
+        with Image.open(ico_file()) as source:
+            source.size = (size, size)
+            image = source.convert("RGBA")
+        corner, center = alpha_report(image)
+        assert corner == 255, f".ico の {size}px が透明になっている: α={corner}"
+        assert center == 255
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="iconutil は macOS にしか無い")
+def test_icns_round_trips_to_ten_transparent_sizes(tmp_path):
+    """iconutil で戻して、10 解像度すべてで透明が効いていることを確かめる。
+
+    ic04 / ic05（16x16 と 32x32 の @1x）は ARGB で入っていて PNG として
+    読めないので、macOS でだけこの経路で確認する。
+    """
+    from PIL import Image
+
+    iconset = tmp_path / "check.iconset"
+    result = subprocess.run(
+        ["iconutil", "-c", "iconset", str(icns_file()), "-o", str(iconset)],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, f"iconutil に失敗: {result.stderr}"
+
+    frames = sorted(iconset.glob("*.png"))
+    assert len(frames) == 10, f"取り出せたのが {len(frames)} 枚（10 枚を期待）"
+    for frame in frames:
+        with Image.open(frame) as source:
+            corner, center = alpha_report(source.convert("RGBA"))
+        assert corner == 0, f"{frame.name} の四隅が透明でない: α={corner}"
+        assert center == 255, f"{frame.name} の中央が不透明でない: α={center}"
 
 
 def test_source_png_is_large_enough_for_icns():
