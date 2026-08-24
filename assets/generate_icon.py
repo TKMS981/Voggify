@@ -30,7 +30,7 @@ import tempfile
 from pathlib import Path
 
 try:
-    from PIL import Image
+    from PIL import Image, ImageDraw
 except ImportError:  # pragma: no cover
     print("Pillow が必要です:  pip install -r requirements-dev.txt", file=sys.stderr)
     raise SystemExit(1)
@@ -59,6 +59,18 @@ ICNS_SIZES = (
 
 #: .icns は 1024x1024（512@2x）まで入るので、元画像もそれ以上が望ましい
 MIN_ICNS_SOURCE_PX = 1024
+
+#: .icns を組むときの基準キャンバス（最大解像度）
+ICNS_CANVAS_PX = 1024
+
+#: 実体がキャンバスに占める割合。Apple 純正アイコンの実測値（814 / 1024）
+MACOS_CONTENT_RATIO = 814 / 1024
+
+#: 角の superellipse の指数。5 が Apple の squircle にほぼ一致する
+MACOS_SQUIRCLE_EXPONENT = 5.0
+
+#: マスクを描くときの拡大率（縁を滑らかにするため大きく描いて縮める）
+MASK_SUPERSAMPLE = 4
 
 
 def main() -> int:
@@ -111,6 +123,89 @@ def main() -> int:
     return _write_icns(image, shortest)
 
 
+def _content_box(image: "Image.Image", tolerance: int = 26) -> tuple[int, int, int, int]:
+    """原本に描かれている角丸矩形の位置を、外周の余白の厚みから割り出す。
+
+    四隅の色を余白の色とみなし、中心線を端から走査して余白が途切れる所を探す。
+    面で塗りつぶすと、内側にある同じ色の帯へ漏れることがあるので線で見る。
+    """
+    width, height = image.size
+    pixels = image.load()
+    background = pixels[0, 0]
+
+    def is_background(point) -> bool:
+        return all(abs(a - b) <= tolerance for a, b in zip(point[:3], background[:3]))
+
+    def scan(coords) -> int:
+        for index, point in enumerate(coords):
+            if not is_background(point):
+                return index
+        return 0
+
+    row, column = height // 2, width // 2
+    left = scan([pixels[x, row] for x in range(width)])
+    right = scan([pixels[width - 1 - x, row] for x in range(width)])
+    top = scan([pixels[column, y] for y in range(height)])
+    bottom = scan([pixels[column, height - 1 - y] for y in range(height)])
+    return left, top, width - right, height - bottom
+
+
+def _squircle_mask(canvas: int, side: int) -> "Image.Image":
+    """superellipse のマスクを作る。中央に一辺 side の実体を置く。
+
+    |x/a|^n + |y/a|^n = 1 を行ごとに解いて横棒で塗る。大きく描いてから
+    縮めることで縁を滑らかにする（PIL に superellipse は無いので自前）。
+    """
+    scale = MASK_SUPERSAMPLE
+    size = canvas * scale
+    radius = side * scale / 2
+    center = size / 2
+    exponent = MACOS_SQUIRCLE_EXPONENT
+
+    mask = Image.new("L", (size, size), 0)
+    draw = ImageDraw.Draw(mask)
+    for row in range(size):
+        offset = abs((row + 0.5) - center) / radius
+        if offset >= 1.0:
+            continue
+        half = radius * (1.0 - offset**exponent) ** (1.0 / exponent)
+        draw.line([(center - half, row), (center + half - 1, row)], fill=255)
+    return mask.resize((canvas, canvas), Image.Resampling.LANCZOS)
+
+
+def _macos_shaped(image: "Image.Image") -> "Image.Image":
+    """原本を macOS の版面に合わせ、squircle でくり抜いた 1024px 画像を作る。"""
+    canvas = ICNS_CANVAS_PX
+    side = round(canvas * MACOS_CONTENT_RATIO)
+
+    left, top, right, bottom = _content_box(image)
+    content = image.crop((left, top, right, bottom))
+    print(
+        f"  原本の角丸矩形: ({left}, {top}) - ({right}, {bottom})"
+        f"  {right - left}x{bottom - top}"
+    )
+
+    # 実体が一辺 side を覆いきるよう、短い方を基準に等倍で拡大縮小する
+    # （縦横比を変えて歪ませない。はみ出た分はマスクで落ちる）
+    factor = side / min(content.size)
+    resized = content.resize(
+        (round(content.width * factor), round(content.height * factor)),
+        Image.Resampling.LANCZOS,
+    )
+
+    shaped = Image.new("RGBA", (canvas, canvas), (0, 0, 0, 0))
+    shaped.paste(
+        resized,
+        ((canvas - resized.width) // 2, (canvas - resized.height) // 2),
+    )
+    shaped.putalpha(_squircle_mask(canvas, side))
+    print(
+        f"  macOS 版面: 一辺 {side}px / キャンバス {canvas}px"
+        f"（余白 {(canvas - side) // 2}px）、指数 {MACOS_SQUIRCLE_EXPONENT} の squircle"
+    )
+    return shaped
+
+
 def _iconset_name(logical: int, scale: int) -> str:
     """.iconset の中でのファイル名。iconutil はこの命名しか受け付けない。"""
     suffix = "" if scale == 1 else f"@{scale}x"
@@ -127,12 +222,14 @@ def _write_icns(image: "Image.Image", shortest: int) -> int:
             file=sys.stderr,
         )
 
+    shaped = _macos_shaped(image)
+
     with tempfile.TemporaryDirectory() as work:
         iconset = Path(work) / "icon.iconset"
         iconset.mkdir()
         for logical, scale in ICNS_SIZES:
             pixels = logical * scale
-            frame = image.resize((pixels, pixels), Image.Resampling.LANCZOS)
+            frame = shaped.resize((pixels, pixels), Image.Resampling.LANCZOS)
             frame.save(iconset / _iconset_name(logical, scale), format="PNG")
 
         iconutil = shutil.which("iconutil")
@@ -153,9 +250,7 @@ def _write_icns(image: "Image.Image", shortest: int) -> int:
         else:
             # macOS 以外。収録サイズは Pillow の実装依存になる
             print("  補足: iconutil が無いため Pillow で書き出します（macOS 以外）。")
-            image.resize((1024, 1024), Image.Resampling.LANCZOS).save(
-                ICNS_TARGET, format="ICNS"
-            )
+            shaped.save(ICNS_TARGET, format="ICNS")
             method = "Pillow（ICNS 保存）"
 
     print(f"生成: {ICNS_TARGET.name}  {ICNS_TARGET.stat().st_size:,} bytes")
