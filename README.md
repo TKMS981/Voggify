@@ -31,11 +31,15 @@ ffmpeg は Python パッケージではないので別途インストールす�
 ```sh
 # Windows
 winget install Gyan.FFmpeg
-# macOS
-brew install ffmpeg
+# macOS（libvorbis 入り。素の ffmpeg は libvorbis 抜きで OGG が作れない）
+brew install ffmpeg-full
 # Debian / Ubuntu
 sudo apt install ffmpeg
 ```
+
+Homebrew の `ffmpeg` は libvorbis を含まずにビルドされているため、MP3 は作れても
+OGG Vorbis へは変換できない。`ffmpeg-full` を入れること。keg-only で PATH には
+入らないが、Voggify は下に挙げた場所を自動で探すのでそのままで認識される。
 
 インストールできたか確認する。
 
@@ -50,6 +54,13 @@ PATH に無くても、以下の場所は自動で探索する。
 - `C:\ffmpeg\bin`, `C:\Program Files\ffmpeg\bin`, chocolatey / scoop のパス
 - winget のポータブル配置（`%LOCALAPPDATA%\Microsoft\WinGet\Packages\*ffmpeg*\*\bin`）
 - `/usr/bin`, `/usr/local/bin`, `/opt/homebrew/bin`, `/snap/bin`
+- Homebrew の keg-only 配置（`/opt/homebrew/opt/ffmpeg*/bin`, `/usr/local/opt/ffmpeg*/bin`）
+
+探索は 環境変数 → PATH → 上の既知の場所 の順。**PATH の ffmpeg に libvorbis が
+無い場合は、既知の場所も見て libvorbis 入りのビルドがあればそちらを優先する。**
+macOS で PATH に素の `ffmpeg`、keg-only に `ffmpeg-full` がある構成でも、
+何も設定せずに OGG へ変換できるのはこのため。
+環境変数で明示指定した場合は、その指定が常に最優先される。
 
 それでも見つからない場合は環境変数で直接指定できる。実行ファイル・フォルダのどちらでもよい。
 
@@ -347,32 +358,47 @@ $ python main.py info movie.mkv
 
 ## アイコン
 
-`assets/icon.png`（1254x1254）が原本で、そこから `assets/icon.ico` を作って
-exe・インストーラー・ショートカット・ウィンドウに使っている。
+`assets/icon.png`（1254x1254）が原本で、そこから Windows 用の `assets/icon.ico` と
+macOS 用の `assets/icon.icns` を作って、exe・.app・インストーラー・
+ショートカット・ウィンドウに使っている。
 
 ```sh
 python assets/generate_icon.py
 ```
 
-生成した `.ico` はコミットしてあるので、通常このコマンドは要らない。
+生成した `.ico` / `.icns` はコミットしてあるので、通常このコマンドは要らない。
 原本を差し替えたときだけ実行する。
 
-- 収録サイズは 16 / 24 / 32 / 48 / 64 / 128 / 256（すべて 32bit）
+- `.ico` の収録サイズは 16 / 24 / 32 / 48 / 64 / 128 / 256（すべて 32bit）
+- `.icns` は 16x16 / 32x32 / 128x128 / 256x256 / 512x512 の各 @1x・@2x を収録し、
+  実ピクセルで 16 から 1024 までを覆う
 - 元画像が 256px 未満だと拡大が要るため、スクリプトが警告して止まる
-  （拡大で埋めると輪郭が荒れるので、原本を用意し直す方針）
+  （拡大で埋めると輪郭が荒れるので、原本を用意し直す方針）。
+  `.icns` には 1024px が入るので、原本は 1024px 以上が望ましい
 - Pillow はこのスクリプトを走らせるときだけ必要で、アプリの実行時には使わない
 
-反映先は 4 箇所。
+`.icns` は macOS 純正の `iconutil` でまとめている。`.iconset` フォルダに規定の
+名前で PNG を並べて `iconutil -c icns` に渡す、という Apple の手順そのまま。
+`iconutil` が無い環境（macOS 以外）では Pillow の ICNS 保存へ落とすが、
+収録サイズは一致しないことがある。
+
+反映先。
 
 | 場所 | 設定 |
 | --- | --- |
-| exe のアイコン | `voggify.spec` の `ICON_PATH` |
+| exe のアイコン（Windows） | `voggify.spec` の `ICON_PATH` |
+| .app のアイコン（macOS） | `voggify.spec` の `ICON_PATH` → `CFBundleIconFile` |
 | インストーラー（Setup.exe） | `voggify.iss` の `SetupIconFile` |
 | ショートカット / アンインストール一覧 | `voggify.iss` の `IconFilename` / `UninstallDisplayIcon` |
-| ウィンドウとタスクバー | `app.py` / `main_window.py` の `setWindowIcon` |
+| ウィンドウとタスクバー / Dock | `app.py` / `main_window.py` の `setWindowIcon` |
 
-実行時にアイコンを読むため、`.ico` は exe にも同梱している
-（`voggify/resources.py` が `sys._MEIPASS` から探す）。
+実行時にもアイコンを読むため、その OS 用のものを成果物に同梱している
+（`voggify/resources.py` が `sys._MEIPASS` から探し、macOS では `.icns`、
+それ以外は `.ico` を選ぶ）。
+
+原本の `icon.png` はアルファチャンネルを持たないため、Dock では角が透けず
+四角いタイルとして表示される。macOS 標準の角丸にしたい場合は、原本を
+透過 PNG（角の外側がアルファ 0）に差し替えてから再生成する。
 
 ## テスト
 
@@ -411,35 +437,6 @@ pytest -k cancel                    # 名前で絞り込み
 `ffmpeg` マーカーの付いたテストは ffmpeg を起動する。未インストールなら自動でスキップする。
 書き込み権限のテストは、拒否が効かない環境（管理者権限での実行など）ではスキップする。
 
-### アイコン
-
-`assets/icon.png`（1254x1254）が原本で、そこから `assets/icon.ico` を作って
-exe・インストーラー・ショートカット・ウィンドウに使っている。
-
-```sh
-python assets/generate_icon.py
-```
-
-生成した `.ico` はコミットしてあるので、通常このコマンドは要らない。
-原本を差し替えたときだけ実行する。
-
-- 収録サイズは 16 / 24 / 32 / 48 / 64 / 128 / 256（すべて 32bit）
-- 元画像が 256px 未満だと拡大が要るため、スクリプトが警告して止まる
-  （拡大で埋めると輪郭が荒れるので、原本を用意し直す方針）
-- Pillow はこのスクリプトを走らせるときだけ必要で、アプリの実行時には使わない
-
-反映先は 4 箇所。
-
-| 場所 | 設定 |
-| --- | --- |
-| exe のアイコン | `voggify.spec` の `ICON_PATH` |
-| インストーラー（Setup.exe） | `voggify.iss` の `SetupIconFile` |
-| ショートカット / アンインストール一覧 | `voggify.iss` の `IconFilename` / `UninstallDisplayIcon` |
-| ウィンドウとタスクバー | `app.py` / `main_window.py` の `setWindowIcon` |
-
-実行時にアイコンを読むため、`.ico` は exe にも同梱している
-（`voggify/resources.py` が `sys._MEIPASS` から探す）。
-
 ## テストアセット
 
 `tests/assets/` に置いてあるのは ffmpeg の `lavfi` で生成した 440Hz のサイン波で、
@@ -463,29 +460,88 @@ python tests/assets/generate_assets.py
 | `fake.mp3` | `video.mp4` のコピー。拡張子は `.mp3` だが中身は AAC |
 | `broken.mp3` | 音声ではないデータ。解析エラーの確認 |
 
-## exe のビルド
+## アプリのビルド
+
+`voggify.spec` は Windows と macOS で共用する。同じコマンドで、走らせた OS 用の
+成果物ができる。
 
 ```sh
 pip install -r requirements-dev.txt
-pyinstaller voggify.spec           # dist/Voggify.exe ができる
+pyinstaller voggify.spec           # Windows: dist/Voggify.exe
+                                   # macOS  : dist/Voggify.app
 pyinstaller --clean voggify.spec   # キャッシュを捨ててビルドし直す
 ```
 
-- 1 ファイル形式（`--onefile` 相当）。約 54MB、起動はおよそ 1 秒
-  （プレビュー再生のため Qt Multimedia と付属の FFmpeg DLL を含む）
-- コンソールウィンドウは出ない（`console=False`）
+クロスビルドはできない。Windows の exe は Windows で、macOS の .app は macOS で
+それぞれビルドする必要がある。
+
+| | Windows | macOS |
+| --- | --- | --- |
+| 成果物 | `dist/Voggify.exe` | `dist/Voggify.app` |
+| 形式 | 1 ファイル（`--onefile` 相当） | onedir を `.app` で包む |
+| サイズ | 約 54MB | 約 113MB |
+| 起動 | およそ 1 秒 | およそ 0.5 秒 |
+| アイコン | `assets/icon.ico` | `assets/icon.icns` |
+
+macOS を onedir にしているのは、`.app` が中に `Frameworks/` を並べる前提の
+入れ物だから。onefile にすると起動のたびに一時フォルダへ展開することになり、
+体感で遅くなる。サイズが Windows の倍あるのは、`.app` が展開済みの
+Qt フレームワークをそのまま抱えているため（onefile は圧縮されている）。
+
+どちらの OS でも共通:
+
+- コンソールウィンドウ／ターミナルは出ない（`console=False`）
 - **ffmpeg は同梱しない。** ユーザー環境のものを実行時に探す
 
 ビルド設定は `voggify.spec` に置いてある。主に触るのは次の 2 つ。
 
 | 変数 | 用途 |
 | --- | --- |
-| `ICON_PATH` | `.ico` のパス（既定 `assets/icon.ico`）。`None` で既定アイコン |
-| `EXCLUDES` | 取り込まない Qt モジュール。減らすと exe が小さくなる |
+| `ICON_PATH` | アイコンのパス。OS で自動的に `.ico` / `.icns` を選ぶ |
+| `EXCLUDES` | 取り込まない Qt モジュール。減らすと成果物が小さくなる |
 
 `EXCLUDES` に足すときは、外したあと必ず起動確認すること
 （`shiboken6` は PySide6 の中核なので絶対に外さない。`PySide6.QtMultimedia` は
 プレビュー再生に使うので外さない）。
+
+### macOS の .app について
+
+`BUNDLE` の設定は `voggify.spec` にまとめてある。
+
+| 項目 | 値 |
+| --- | --- |
+| `bundle_identifier` | `com.tkms981.voggify` |
+| `CFBundleShortVersionString` | `voggify/__init__.py` の `__version__` |
+| `CFBundleIconFile` | `assets/icon.icns` |
+| `LSMinimumSystemVersion` | 11.0 |
+
+バージョンは Windows のバージョンリソースと同じ `voggify/__init__.py` の
+`__version__` が出どころで、`__init__.py` の 1 行を変えれば両方が追従する。
+
+`NSRequiresAquaSystemAppearance` を `False` にしてあるので、ダークモードに追従する。
+
+**署名していない。** 配布する場合は Gatekeeper に止められるため、受け取った側は
+初回だけ右クリック →「開く」で実行するか、次を実行する必要がある。
+
+```sh
+xattr -dr com.apple.quarantine /Applications/Voggify.app
+```
+
+**Finder の D&D は受けない。** ウィンドウへのドロップには対応しているが、
+`CFBundleDocumentTypes` は宣言していないので、Finder の「このアプリケーションで
+開く」や Dock アイコンへのドロップでは何も起きない。対応するには
+`QFileOpenEvent` の処理を足す必要がある。
+
+### macOS 版での CLI
+
+`.app` の中の実行ファイルを直接叩けば、Windows と同じサブコマンドが使える。
+
+```sh
+./dist/Voggify.app/Contents/MacOS/Voggify check
+```
+
+`open dist/Voggify.app` では引数を渡せない（`open --args` は GUI 起動用）ので、
+CLI として使うときは上のパスを直接指定する。
 
 ### exe 版での CLI
 
@@ -578,7 +634,9 @@ __version__ = "0.5.0"
 ```
 voggify/__init__.py
   ├→ アプリのタイトルバー（"Voggify 0.5.0"）
-  ├→ voggify.spec が exe のバージョンリソースに埋め込む
+  ├→ voggify.spec
+  │     ├→ Windows: exe のバージョンリソース
+  │     └→ macOS  : Info.plist の CFBundleShortVersionString / CFBundleVersion
   └→ voggify.iss が exe から読み取る
         ├→ インストーラーの表示名とアンインストール情報
         └→ 出力ファイル名（Voggify-Setup-0.5.0.exe）

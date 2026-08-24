@@ -1,8 +1,13 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller のビルド設定。
+"""PyInstaller のビルド設定。Windows / macOS 共用。
 
-    pyinstaller voggify.spec           # dist/Voggify.exe ができる
+    pyinstaller voggify.spec           # Windows: dist/Voggify.exe
+                                       # macOS  : dist/Voggify.app
     pyinstaller --clean voggify.spec   # キャッシュを捨ててビルドし直す
+
+Windows は onefile（exe 1 個）、macOS は onedir を .app で包む形にしている。
+.app は中に Frameworks を並べる前提の入れ物なので onefile にすると
+起動のたびに一時フォルダへ展開することになり、体感で遅くなるため。
 
 ffmpeg / ffprobe は同梱しない。ユーザー環境にインストールされたものを
 voggify/ffmpeg_locator.py が実行時に探す（PATH → 環境変数 → 既知の場所）。
@@ -14,6 +19,13 @@ import sys
 from pathlib import Path
 
 APP_NAME = "Voggify"
+
+IS_WINDOWS = sys.platform == "win32"
+IS_MACOS = sys.platform == "darwin"
+
+#: macOS の .app を一意に識別する ID（逆ドメイン形式）。
+#: 署名や設定の保存先の識別に使われるので、公開後は変えないこと。
+BUNDLE_IDENTIFIER = "com.tkms981.voggify"
 
 # --- バージョン -------------------------------------------------------------
 # 唯一の出どころは voggify/__init__.py。ここで読み取って Windows の
@@ -83,13 +95,16 @@ def _write_version_resource() -> str:
     return str(target)
 
 
-VERSION_FILE = _write_version_resource()
-print(f"[voggify.spec] バージョン {APP_VERSION} をビルドします")
+# バージョンリソースは Windows 専用の仕組み。macOS では Info.plist の
+# CFBundleShortVersionString に同じ APP_VERSION を渡す（出どころは共通）。
+VERSION_FILE = _write_version_resource() if IS_WINDOWS else None
+print(f"[voggify.spec] バージョン {APP_VERSION} をビルドします（{sys.platform}）")
 
 # --- アイコン ---------------------------------------------------------------
-# exe に埋め込むアイコン。None にすると PyInstaller の既定アイコンになる。
-# 元画像は assets/icon.png で、assets/generate_icon.py が .ico を作る。
-ICON_PATH = "assets/icon.ico"
+# exe / .app に埋め込むアイコン。None にすると PyInstaller の既定になる。
+# 元画像は assets/icon.png で、assets/generate_icon.py が .ico と .icns を作る。
+# macOS は .icns しか受け付けない（.ico を渡すとビルドが落ちる）。
+ICON_PATH = "assets/icon.icns" if IS_MACOS else "assets/icon.ico"
 
 _icon = None
 if ICON_PATH:
@@ -97,7 +112,14 @@ if ICON_PATH:
     if _candidate.is_file():
         _icon = str(_candidate.resolve())
     else:
-        print(f"[voggify.spec] 警告: アイコンが見つかりません: {_candidate}")
+        print(
+            f"[voggify.spec] 警告: アイコンが見つかりません: {_candidate}\n"
+            "  python assets/generate_icon.py で生成できます。"
+        )
+
+# 実行時に setWindowIcon で読むぶん。voggify/resources.py が OS ごとに
+# 参照する名前を決めているので、その OS 用のものを同梱する。
+_bundled_icons = [str(_ROOT / "assets" / Path(ICON_PATH).name)] if _icon else []
 
 # --- 取り込まないもの -------------------------------------------------------
 # 使っていない Qt モジュールを外して exe を小さくする。
@@ -144,7 +166,7 @@ a = Analysis(
     binaries=[],
     # アイコンは exe に埋め込むだけでなく、実行時にも読む
     # （setWindowIcon 用。voggify/resources.py が sys._MEIPASS から探す）
-    datas=[(str(_ROOT / "assets" / "icon.ico"), "assets")] if _icon else [],
+    datas=[(path, "assets") for path in _bundled_icons],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -156,25 +178,87 @@ a = Analysis(
 
 pyz = PYZ(a.pure)
 
-exe = EXE(
-    pyz,
-    a.scripts,
-    a.binaries,
-    a.datas,
-    [],
-    name=APP_NAME,
-    debug=False,
-    bootloader_ignore_signals=False,
-    strip=False,
-    upx=False,          # UPX はウイルス対策ソフトの誤検知を招きやすいので使わない
-    upx_exclude=[],
-    runtime_tmpdir=None,
-    console=False,      # コンソールウィンドウを出さない（--noconsole 相当）
-    disable_windowed_traceback=False,
-    argv_emulation=False,
-    target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
-    icon=_icon,
-    version=VERSION_FILE,
-)
+if IS_MACOS:
+    # onedir。EXE には本体だけ入れ、ライブラリ類は COLLECT が並べる。
+    exe = EXE(
+        pyz,
+        a.scripts,
+        [],
+        exclude_binaries=True,
+        name=APP_NAME,
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=False,
+        upx=False,
+        console=False,      # ターミナルを開かない（.app として起動する）
+        disable_windowed_traceback=False,
+        # argv_emulation は Finder の「開く」を argv に化けさせる仕組み。
+        # Voggify はウィンドウへの D&D で受けており、QFileOpenEvent も
+        # 見ていないので有効にしない（有効にすると起動が遅くなる）。
+        argv_emulation=False,
+        target_arch=None,   # ビルドした Mac のアーキテクチャに合わせる
+        codesign_identity=None,
+        entitlements_file=None,
+        icon=_icon,
+    )
+
+    coll = COLLECT(
+        exe,
+        a.binaries,
+        a.datas,
+        strip=False,
+        upx=False,
+        upx_exclude=[],
+        name=APP_NAME,
+    )
+
+    app = BUNDLE(
+        coll,
+        name=f"{APP_NAME}.app",
+        icon=_icon,
+        bundle_identifier=BUNDLE_IDENTIFIER,
+        version=APP_VERSION,
+        info_plist={
+            # Dock とメニューバーに出る名前。CFBundleName は 15 文字以内が目安
+            "CFBundleName": APP_NAME,
+            "CFBundleDisplayName": APP_NAME,
+            "CFBundleExecutable": APP_NAME,
+            # 表示用のバージョンと、ビルド番号。どちらも APP_VERSION が出どころ
+            "CFBundleShortVersionString": APP_VERSION,
+            "CFBundleVersion": APP_VERSION,
+            "NSHumanReadableCopyright": "MIT License",
+            # Retina で描く。無いと 2x 環境でぼやける
+            "NSHighResolutionCapable": True,
+            # ダークモードに追従する（True にすると常にライト固定になる）
+            "NSRequiresAquaSystemAppearance": False,
+            "LSApplicationCategoryType": "public.app-category.music",
+            "LSMinimumSystemVersion": "11.0",
+            # CFBundleDocumentTypes はあえて宣言しない。宣言すると Finder の
+            # 「このアプリケーションで開く」に出るが、QFileOpenEvent を
+            # 見ていないため何も起きず、壊れているように見えるため。
+        },
+    )
+else:
+    # Windows / Linux は onefile のまま
+    exe = EXE(
+        pyz,
+        a.scripts,
+        a.binaries,
+        a.datas,
+        [],
+        name=APP_NAME,
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=False,
+        upx=False,          # UPX はウイルス対策ソフトの誤検知を招きやすいので使わない
+        upx_exclude=[],
+        runtime_tmpdir=None,
+        console=False,      # コンソールウィンドウを出さない（--noconsole 相当）
+        disable_windowed_traceback=False,
+        argv_emulation=False,
+        target_arch=None,
+        codesign_identity=None,
+        entitlements_file=None,
+        icon=_icon,
+        version=VERSION_FILE,
+    )
