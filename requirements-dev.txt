@@ -7,6 +7,12 @@ pytest>=7.0
 # exe のビルド（pyinstaller voggify.spec）
 pyinstaller>=6.0
 
-# アイコンの生成（python assets/generate_icon.py）
-# 生成した .ico はコミットしてあるので、アプリの実行時には不要
+# アイコンと dmg 背景の生成
+#   python assets/generate_icon.py
+#   python assets/generate_dmg_background.py
+# 生成物はコミットしてあるので、アプリの実行時には不要
 Pillow>=10.0
+
+# macOS の配布用 dmg のビルド（./build_macos.sh）
+# Finder を操作せず .DS_Store を直接書くので、GUI セッションが要らない
+dmgbuild>=1.6 ; sys_platform == "darwin"

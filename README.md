@@ -492,6 +492,14 @@ pyinstaller voggify.spec           # Windows: dist/Voggify.exe
 pyinstaller --clean voggify.spec   # キャッシュを捨ててビルドし直す
 ```
 
+macOS は配布用の dmg まで一気に作るスクリプトがある。ふつうはこちらを使う。
+
+```sh
+./build_macos.sh            # dist/Voggify.app と dist/Voggify-0.5.0.dmg
+./build_macos.sh --clean    # キャッシュを捨ててから
+./build_macos.sh --app-only # .app まで（dmg を作らない）
+```
+
 クロスビルドはできない。Windows の exe は Windows で、macOS の .app は macOS で
 それぞれビルドする必要がある。
 
@@ -540,17 +548,67 @@ Qt フレームワークをそのまま抱えているため（onefile は圧縮
 
 `NSRequiresAquaSystemAppearance` を `False` にしてあるので、ダークモードに追従する。
 
-**署名していない。** 配布する場合は Gatekeeper に止められるため、受け取った側は
-初回だけ右クリック →「開く」で実行するか、次を実行する必要がある。
-
-```sh
-xattr -dr com.apple.quarantine /Applications/Voggify.app
-```
+**署名していない。** 配布時の Gatekeeper の扱いは「配布するときは」を参照。
 
 **Finder の D&D は受けない。** ウィンドウへのドロップには対応しているが、
 `CFBundleDocumentTypes` は宣言していないので、Finder の「このアプリケーションで
 開く」や Dock アイコンへのドロップでは何も起きない。対応するには
 `QFileOpenEvent` の処理を足す必要がある。
+
+### macOS の dmg
+
+`./build_macos.sh` が `dist/Voggify-<version>.dmg` を作る。ファイル名の付け方は
+Windows のインストーラー（`Voggify-Setup-0.5.0.exe`）に合わせてあり、
+バージョンは `voggify/__init__.py` の `__version__` から取る。
+
+中身は一般的な macOS アプリの配布物と同じで、`Voggify.app` と `Applications`
+への symlink を並べ、背景でドラッグ先を示している。
+
+| 項目 | 値 |
+| --- | --- |
+| ボリューム名 | `Voggify 0.5.0` |
+| ウィンドウ内寸 | 600 x 400 |
+| アイコンサイズ | 128px |
+| アイコン位置 | `Voggify.app` (150, 185) / `Applications` (450, 185) |
+| 形式 | UDZO（zlib 圧縮、読み取り専用） |
+
+設定は `dmg_settings.py` の 1 枚にまとまっている。背景画像は
+`assets/generate_dmg_background.py` が作り、Retina 用に等倍と 2 倍を
+1 つの TIFF に入れている（`tiffutil -cathidpicheck`）。
+
+**ウィンドウの寸法とアイコンの位置は、背景を描くスクリプトと `dmg_settings.py`
+の両方に書いてある。**片方だけ変えると背景と中身がずれるので、必ず両方直すこと
+（ずれは `tests/test_resources.py` が検出する）。
+
+#### なぜ dmgbuild なのか
+
+dmg を組む道具は主に 3 つある。
+
+| | 方式 | 判断 |
+| --- | --- | --- |
+| `create-dmg` | AppleScript で Finder を操作して並べる | GUI セッションと自動化の許可が要る。CI や権限を絞った環境では失敗する |
+| `hdiutil` 直叩き | イメージは作れる | 見た目を決める `.DS_Store` を自前で書く必要があり、結局いちばん面倒な部分が残る |
+| **`dmgbuild`** | `.DS_Store` を直接書く | **採用。**Finder を触らないので GUI が要らず、設定が 1 ファイルに収まる |
+
+`dmgbuild` は Python パッケージなので `requirements-dev.txt` に入れてある。
+PyInstaller や Pillow と同じ扱いで、**brew で新しく入れるものは無い**。
+
+### 配布するときは
+
+**署名も公証（notarization）もしていない。** ダウンロードした利用者の環境では
+Gatekeeper に止められる。`spctl` で確認すると `rejected` になる
+（PyInstaller が ad-hoc 署名を付けるだけで、Developer ID ではないため）。
+
+利用者側の回避方法は 2 つ。dmg の背景にも短く書いてある。
+
+```sh
+# 方法 1: Finder で右クリック →「開く」→ ダイアログで「開く」
+# 方法 2: 属性を消す
+xattr -dr com.apple.quarantine /Applications/Voggify.app
+```
+
+配布物として体裁を整えるなら、Apple Developer Program（年額）に入って
+Developer ID で署名し、notarization を通す必要がある。
 
 ### macOS 版での CLI
 
