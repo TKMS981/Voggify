@@ -262,6 +262,80 @@ def test_icns_round_trips_to_ten_transparent_sizes(tmp_path):
         assert center == 255, f"{frame.name} の中央が不透明でない: α={center}"
 
 
+# ---------------------------------------------------------------------------
+# dmg の背景（macOS の配布物）
+# ---------------------------------------------------------------------------
+def dmg_background() -> Path:
+    return resource_path("assets/dmg_background.tiff")
+
+
+def _dmg_settings() -> dict:
+    """dmg_settings.py を読み取る。dmgbuild と同じく exec して中を見る。"""
+    settings: dict = {"defines": {"root": str(resource_root())}}
+    source = (resource_root() / "dmg_settings.py").read_text(encoding="utf-8")
+    exec(compile(source, "dmg_settings.py", "exec"), settings, settings)
+    return settings
+
+
+def test_dmg_background_exists():
+    assert dmg_background().is_file(), (
+        "assets/dmg_background.tiff がありません。"
+        "python assets/generate_dmg_background.py で生成してください。"
+    )
+
+
+def test_dmg_background_has_a_retina_pair():
+    """Finder は論理サイズで背景を出すので、等倍と 2 倍の両方が要る。"""
+    from PIL import Image
+
+    with Image.open(dmg_background()) as image:
+        sizes = []
+        for frame in range(getattr(image, "n_frames", 1)):
+            image.seek(frame)
+            sizes.append(image.size)
+    assert len(sizes) == 2, f"TIFF に {len(sizes)} 枚しか入っていない（等倍と 2 倍で 2 枚）"
+    (width, height), (retina_width, retina_height) = sizes
+    assert (retina_width, retina_height) == (width * 2, height * 2), (
+        f"2 倍の絵が {retina_width}x{retina_height}（{width * 2}x{height * 2} を期待）"
+    )
+
+
+def test_dmg_window_matches_the_background_size():
+    """ウィンドウの内寸と背景画像がずれていないこと。
+
+    ずれると背景がタイル表示になったり切れたりする。生成側と設定側が
+    別ファイルなので、片方だけ変えた事故をここで止める。
+    """
+    from PIL import Image
+
+    settings = _dmg_settings()
+    (_, _), (width, height) = settings["window_rect"]
+    with Image.open(dmg_background()) as image:
+        assert image.size == (width, height), (
+            f"背景 {image.size} と window_rect {(width, height)} が不一致"
+        )
+
+
+def test_dmg_icons_sit_inside_the_window():
+    """アイコンがウィンドウからはみ出していないこと。"""
+    settings = _dmg_settings()
+    (_, _), (width, height) = settings["window_rect"]
+    half = settings["icon_size"] / 2
+    for name, (x, y) in settings["icon_locations"].items():
+        assert half <= x <= width - half, f"{name} の x={x} がはみ出している"
+        assert half <= y <= height - half, f"{name} の y={y} がはみ出している"
+
+
+def test_dmg_contains_the_app_and_the_applications_link():
+    """ドラッグ&ドロップで入れられる形になっていること。"""
+    settings = _dmg_settings()
+    assert settings["symlinks"] == {"Applications": "/Applications"}
+    assert any(f.endswith(".app") for f in settings["files"]), settings["files"]
+    names = set(settings["icon_locations"])
+    assert "Applications" in names
+    assert any(n.endswith(".app") for n in names), names
+
+
 def test_source_png_is_large_enough_for_icns():
     """.icns には 1024px が入るので、元画像もそれ以上必要。"""
     png = resource_path("assets/icon.png")
